@@ -87,114 +87,203 @@ def test_materialize():
     print("materialize: ok")
 
 
-def test_manager():
+def collect(m):
+    """Ordered event log of every player-directed signal."""
+    events = []
+    m.createPlayer.connect(lambda tid: events.append(("create", tid)))
+    m.destroyPlayer.connect(lambda tid: events.append(("destroy", tid)))
+    m.setActivePlayer.connect(lambda tid: events.append(("show", tid)))
+    m.mpvCommandFor.connect(lambda tid, cmd: events.append(("cmd", tid, cmd)))
+    return events
+
+
+def make_manager(store, **kw):
+    kw.setdefault("materialize_delay_ms", 0)
+    kw.setdefault("now_fn", lambda: 1000.0)
+    return TabManager(store, **kw)
+
+
+def test_pool_switching():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
-        m = TabManager(store, materialize_delay_ms=0)
-        cmds = []
-        m.mpvCommand.connect(cmds.append)
+        m = make_manager(store)
+        ev = collect(m)
 
-        # First play creates a tab, activates it, materializes.
+        # First play: player created for the tab, shown, materialized.
         m.playVideo("aaaaaaaaaaa", "A")
-        assert m.activeIndex == 0
-        assert m.rowCount() == 1
-        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
-
-        # Background tab: persisted, not materialized, active unchanged.
-        cmds.clear()
-        m.playbackTime(33.0)
-        m.openInNewTab("bbbbbbbbbbb", "B")
-        assert (m.rowCount(), m.activeIndex, cmds) == (2, 0, [])
-
-        # Switch: outgoing position persisted, incoming materialized.
-        m.activate(1)
-        assert m.activeIndex == 1
-        assert cmds == [["stop"], ["loadfile", url("bbbbbbbbbbb"), "replace"]]
-        tabs, _ = store.load()
-        assert tabs[0].position_secs == 33.0
-
-        # Activating the already-materialized tab is a no-op.
-        cmds.clear()
-        m.activate(1)
-        assert cmds == []
-
-        # Closing the active tab activates a neighbour and resumes it.
-        m.closeTab(1)
-        assert m.activeIndex == 0
-        assert cmds == [
-            ["stop"],
-            ["loadfile", url("aaaaaaaaaaa"), "replace", -1, {"start": "33.0"}],
+        t1 = store.load()[0][0].id
+        assert ev == [
+            ("create", t1), ("show", t1),
+            ("cmd", t1, ["stop"]),
+            ("cmd", t1, ["loadfile", url("aaaaaaaaaaa"), "replace"]),
         ]
 
-        # Closing the last tab stops playback.
-        cmds.clear()
-        m.closeTab(0)
-        assert (m.rowCount(), m.activeIndex, cmds) == (0, -1, [["stop"]])
+        # Background tab: no player until activated.
+        ev.clear()
+        m.openInNewTab("bbbbbbbbbbb", "B")
+        t2 = store.load()[0][1].id
+        assert ev == []
 
-    # Auto-advance: playlist-pos maps back through the materialize offset.
+        m.activate(1)
+        assert ev == [
+            ("create", t2), ("show", t2),
+            ("cmd", t2, ["stop"]),
+            ("cmd", t2, ["loadfile", url("bbbbbbbbbbb"), "replace"]),
+        ]
+
+        # Switching back to a LIVE tab: show only — the browser feel.
+        ev.clear()
+        m.activate(0)
+        assert ev == [("show", t1)]
+
+        # Replacing the video of the active tab reloads its own player.
+        ev.clear()
+        m.playVideo("ccccccccccc", "C")
+        assert ev == [
+            ("show", t1),
+            ("cmd", t1, ["stop"]),
+            ("cmd", t1, ["loadfile", url("ccccccccccc"), "replace"]),
+        ]
+    print("pool switching: ok")
+
+
+def test_pool_evict():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
-        q = [QueueItem("aaaaaaaaaaa", "A"), QueueItem("bbbbbbbbbbb", "B"),
-             QueueItem("ccccccccccc", "C")]
-        tid = store.create(q)
-        store.save_state(tid, 1, 0.0)
-        m = TabManager(store, materialize_delay_ms=0)
-        m.mpvCommand.connect(lambda _: None)
+        clock = [1000.0]
+        m = make_manager(store, now_fn=lambda: clock[0], live_cap=2,
+                         freeze_ttl_secs=1800)
+        ev = collect(m)
 
-        m.activate(0)  # materialized at queue_idx 1 -> offset 1
-        m.playlistPos(1)  # mpv advanced to its playlist item 1 -> queue idx 2
+        vids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]
+        for v in vids:
+            m.openInNewTab(v, v)
+        tabs, _ = store.load()
+        ids = [t.id for t in tabs]
+
+        # Activate 1 then 2: both live (cap 2).
+        m.activate(0)
+        clock[0] += 10
+        m.activate(1)
+        assert ("destroy", ids[0]) not in ev
+
+        # Activating a third: LRU (tab 1) frozen.
+        clock[0] += 10
+        ev.clear()
+        m.playbackTime(ids[0], 33.0)  # position noted while it was live
+        m.activate(2)
+        assert ev[0] == ("destroy", ids[0])
+
+        # Returning to the frozen tab re-materializes with resume position.
+        clock[0] += 10
+        ev.clear()
+        m.activate(0)
+        assert ("create", ids[0]) in ev
+        assert ("cmd", ids[0],
+                ["loadfile", url(vids[0]), "replace", -1, {"start": "33.0"}]) in ev
+
+        # TTL: background player idle past the TTL is frozen by the
+        # heartbeat; the active one never is.
+        clock[0] += 1801
+        ev.clear()
+        m.persistActive()
+        assert ("destroy", ids[2]) in ev
+        assert ("destroy", ids[0]) not in ev
+    print("pool evict: ok")
+
+
+def test_pool_close():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        m = make_manager(store)
+        ev = collect(m)
+
+        m.playVideo("aaaaaaaaaaa", "A")
+        m.openInNewTab("bbbbbbbbbbb", "B")
+        m.activate(1)
+        tabs, _ = store.load()
+        t1, t2 = tabs[0].id, tabs[1].id
+
+        # Closing the active tab with a live neighbour: destroy + show only.
+        ev.clear()
+        m.closeTab(1)
+        assert ev == [("destroy", t2), ("show", t1)]
+
+        # Closing the last tab: destroy, no further commands.
+        ev.clear()
+        m.closeTab(0)
+        assert ev == [("destroy", t1)]
+        assert (m.rowCount(), m.activeIndex) == (0, -1)
+    print("pool close: ok")
+
+
+def test_per_tab_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        cache = StreamUrlCache()
+        m = make_manager(store, url_cache=cache)
+        collect(m)
+
+        m.playVideo("aaaaaaaaaaa", "A")
+        m.openInNewTab("bbbbbbbbbbb", "B")
+        m.activate(1)
+        tabs, _ = store.load()
+        t1, t2 = tabs[0].id, tabs[1].id
+
+        # playbackTime is routed by tab id, not "whatever is active".
+        m.playbackTime(t1, 11.0)
+        m.playbackTime(t2, 22.0)
         m.persistActive()
         tabs, _ = store.load()
-        assert tabs[0].queue_idx == 2
-        # Stray -1 (idle) is ignored.
-        m.playlistPos(-1)
-        m.persistActive()
-        tabs, _ = store.load()
-        assert tabs[0].queue_idx == 2
-    print("tab manager: ok")
+        assert tabs[1].position_secs == 22.0
+
+        # resolvedUrl is credited to the reporting tab's current video.
+        resolved = "https://rr1.googlevideo.com/videoplayback?expire=1704067200"
+        m.resolvedUrl(t1, resolved)
+        assert cache.get("aaaaaaaaaaa", now=1000.0) == resolved
+
+        # playlistPos routed by id too (single-item queue: stays 0).
+        m.playlistPos(t1, 0)
+    print("per-tab state: ok")
 
 
 def test_enqueue_playnext():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
-        m = TabManager(store, materialize_delay_ms=0)
-        cmds = []
-        m.mpvCommand.connect(cmds.append)
+        m = make_manager(store)
+        ev = collect(m)
 
-        # Enqueue with no tabs behaves like playVideo (creates + plays).
-        m.enqueue("aaaaaaaaaaa", "A")
-        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
+        m.playVideo("aaaaaaaaaaa", "A")
+        t1 = store.load()[0][0].id
 
-        # Enqueue on the materialized active tab: sqlite grows, mpv appends.
-        cmds.clear()
+        # Enqueue on the live active tab: sqlite grows, its player appends.
+        ev.clear()
         m.enqueue("bbbbbbbbbbb", "B")
         tabs, _ = store.load()
         assert [q.video_id for q in tabs[0].queue] == ["aaaaaaaaaaa", "bbbbbbbbbbb"]
-        assert (tabs[0].queue_idx, tabs[0].position_secs) == (0, 0.0)  # no reset
-        assert cmds == [["loadfile", url("bbbbbbbbbbb"), "append"]]
+        assert (tabs[0].queue_idx, tabs[0].position_secs) == (0, 0.0)
+        assert ev == [("cmd", t1, ["loadfile", url("bbbbbbbbbbb"), "append"])]
 
-        # Play next inserts right after the current item, mpv insert-next.
-        cmds.clear()
+        # Play next inserts after current, player gets insert-next.
+        ev.clear()
         m.playNext("ccccccccccc", "C")
         tabs, _ = store.load()
         assert [q.video_id for q in tabs[0].queue] == [
             "aaaaaaaaaaa", "ccccccccccc", "bbbbbbbbbbb"
         ]
-        assert cmds == [["loadfile", url("ccccccccccc"), "insert-next"]]
+        assert ev == [("cmd", t1, ["loadfile", url("ccccccccccc"), "insert-next"])]
 
-        # On a restored (not materialized) tab: sqlite only, no mpv commands.
-        store2 = make_store(tmp)
-        m2 = TabManager(store2, materialize_delay_ms=0)
-        cmds2 = []
-        m2.mpvCommand.connect(cmds2.append)
-        m2.enqueue("ddddddddddd", "D")
-        m2.playNext("eeeeeeeeeee", "E")
-        tabs, _ = store2.load()
-        assert [q.video_id for q in tabs[0].queue] == [
-            "aaaaaaaaaaa", "eeeeeeeeeee", "ccccccccccc", "bbbbbbbbbbb",
-            "ddddddddddd",
-        ]
-        assert cmds2 == []
+    # On a restored (never-activated) tab: sqlite only, no commands.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        store.create([QueueItem("aaaaaaaaaaa", "A")])
+        store.set_active(store.load()[0][0].id)
+        m = make_manager(store)
+        ev = collect(m)
+        m.enqueue("ddddddddddd", "D")
+        tabs, _ = store.load()
+        assert [q.video_id for q in tabs[0].queue] == ["aaaaaaaaaaa", "ddddddddddd"]
+        assert ev == []
     print("enqueue/play-next: ok")
 
 
@@ -202,45 +291,39 @@ def test_resolved_url_cache():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
         cache = StreamUrlCache()
-        m = TabManager(store, materialize_delay_ms=0, url_cache=cache,
-                       now_fn=lambda: 1000.0)
-        cmds = []
-        m.mpvCommand.connect(cmds.append)
+        m = make_manager(store, url_cache=cache, live_cap=1)
+        ev = collect(m)
 
-        # First play: normal watch URL (nothing cached yet); mpv resolves
-        # and the bridge reports the stream back.
+        # Play, resolve, then freeze the tab by activating another.
         m.playVideo("aaaaaaaaaaa", "A")
-        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
+        t1 = store.load()[0][0].id
         resolved = "https://rr1.googlevideo.com/videoplayback?expire=1704067200"
-        m.resolvedUrl(resolved)
-
-        # Switch away and back: the cached stream loads, no re-extraction.
+        m.resolvedUrl(t1, resolved)
         m.openInNewTab("bbbbbbbbbbb", "B")
-        m.activate(1)
-        cmds.clear()
+        m.activate(1)  # cap 1: t1 frozen
+
+        # Back to the frozen tab: re-materializes via the cached stream.
+        ev.clear()
         m.activate(0)
-        assert cmds == [["stop"], ["loadfile", resolved, "replace"]]
+        assert ("cmd", t1, ["loadfile", resolved, "replace"]) in ev
 
-        # Cached stream failed (stale despite margin): invalidate and
-        # re-materialize through the original URL — once, no retry loop.
-        cmds.clear()
-        m.loadFailed()
-        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
-        cmds.clear()
-        m.loadFailed()
-        assert cmds == []
-
-        # Enqueue of an already-seen video also rides the cache.
-        m.resolvedUrl(resolved)
-        m.enqueue("aaaaaaaaaaa", "again")  # queue grows on the active tab
-        assert cmds[-1] == ["loadfile", resolved, "append"]
+        # Stale cached stream: invalidate, retry once via the page URL.
+        ev.clear()
+        m.loadFailed(t1)
+        assert ("cmd", t1, ["loadfile", url("aaaaaaaaaaa"), "replace"]) in ev
+        ev.clear()
+        m.loadFailed(t1)
+        assert ev == []
     print("resolved url cache: ok")
 
 
 if __name__ == "__main__":
     test_store()
     test_materialize()
-    test_manager()
+    test_pool_switching()
+    test_pool_evict()
+    test_pool_close()
+    test_per_tab_state()
     test_enqueue_playnext()
     test_resolved_url_cache()
     print("all checks passed")

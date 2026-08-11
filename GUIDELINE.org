@@ -86,10 +86,20 @@ Three distinct structures — do not merge them:
 | Tabs        | parallel playback contexts            | local sqlite        |
 | Watch later | persistent, unordered                 | YouTube =WL= playlist |
 
-- ONE libmpv instance, always. A tab is a playback context
-  ={queue: [video_id], queue_idx, position_secs}=, not a player. Every
-  queue lives in sqlite; mpv's playlist is a materialization of the
-  ACTIVE tab only — so queues survive restarts for free.
+- A POOL of libmpv instances with a hard cap (decided 2026-08-11,
+  superseding "one instance, always"): browser-grade tab switching needs
+  a live, paused player per recent tab — switching is show/pause, not
+  reload. Cap 3 live players (LRU evict) plus a 30-minute background TTL:
+  browser-style tab discarding, so 20 open tabs never mean 20 decoders.
+  A frozen tab stays in the strip; only its playback context
+  ={queue: [video_id], queue_idx, position_secs}= survives (sqlite, as
+  always), and returning to it re-materializes — through the
+  resolved-URL cache when still valid. The RAM cost measured far below the
+  estimate: 3 live players = 578MB avg / 681MB peak PSS vs 585/608 for
+  one (paused players hold no growing buffers) — still under Chromium's
+  819MB.
+  Every queue lives in sqlite; a player's playlist is a materialization
+  of ITS tab only — so queues survive restarts for free.
 - Tab switch: persist =playback-time= + =playlist-pos= of the outgoing
   tab, then =loadfile <first> replace start=<pos>= plus =loadfile append=
   for the rest. =loadfile replace= clears mpv's playlist (man mpv 0.41) —

@@ -1,5 +1,8 @@
-"""Tab strip model + the one place tab state meets mpv. Sync is one-way:
-commands go out via mpvCommand, only playlist-pos/playback-time flow back."""
+"""Tab strip model + the browser-style player pool. Each recently-used tab
+keeps a live, PAUSED mpv player (switching = show/pause, no reload); a hard
+cap plus a background TTL freeze old tabs the way browsers discard them.
+Sync stays one-way: commands out via per-tab signals, only the
+playback-time/playlist-pos observers flow back."""
 
 import time
 
@@ -19,12 +22,15 @@ TITLE, ACTIVE = range(Qt.ItemDataRole.UserRole + 1, Qt.ItemDataRole.UserRole + 3
 
 WATCH_URL = "https://www.youtube.com/watch?v="
 
+LIVE_CAP = 3
+FREEZE_TTL_SECS = 30 * 60
+
 
 def materialize(tab: Tab, resolve=None) -> list[list]:
-    """Commands that load a tab into mpv: current item replaces the playlist
-    (resume position as a per-item option), upcoming items append so mpv can
-    auto-advance. Earlier items live only in sqlite. `resolve` maps a
-    video_id to a URL (cached stream or watch page); default is the page."""
+    """Commands that load a tab into its player: current item replaces the
+    playlist (resume position as a per-item option), upcoming items append
+    so mpv can auto-advance. Earlier items live only in sqlite. `resolve`
+    maps a video_id to a URL (cached stream or watch page)."""
     if resolve is None:
         resolve = lambda vid: WATCH_URL + vid  # noqa: E731
     if not tab.queue:
@@ -39,27 +45,39 @@ def materialize(tab: Tab, resolve=None) -> list[list]:
     ]
 
 
+class _LivePlayer:
+    __slots__ = ("offset", "used_cache", "last_active")
+
+    def __init__(self, offset: int, now: float):
+        self.offset = offset
+        self.used_cache = False
+        self.last_active = now
+
+
 class TabManager(QAbstractListModel):
-    mpvCommand = Signal("QVariant")
+    createPlayer = Signal(int)
+    destroyPlayer = Signal(int)
+    setActivePlayer = Signal(int)
+    mpvCommandFor = Signal(int, "QVariant")
     videoStarted = Signal()
     activeIndexChanged = Signal()
 
     def __init__(self, store: TabStore, materialize_delay_ms: int = 50,
-                 url_cache=None, now_fn=time.time, parent=None):
+                 url_cache=None, now_fn=time.time, live_cap: int = LIVE_CAP,
+                 freeze_ttl_secs: float = FREEZE_TTL_SECS, parent=None):
         super().__init__(parent)
         self._store = store
         self._materialize_delay_ms = materialize_delay_ms
         self._url_cache = url_cache
         self._now = now_fn
-        self._used_cache = False  # last materialization rode cached URLs
+        self._live_cap = max(1, live_cap)
+        self._freeze_ttl = freeze_ttl_secs
         self._tabs, active_id = store.load()
         self._active = next(
             (i for i, t in enumerate(self._tabs) if t.id == active_id), -1
         )
-        # No autoplay on startup: tabs are restored, none is materialized
-        # until clicked. _materialized tracks which tab owns mpv's playlist.
-        self._materialized: int | None = None
-        self._offset = 0  # sqlite queue_idx at materialize time
+        # No autoplay on startup: restored tabs get a player on first click.
+        self._live: dict[int, _LivePlayer] = {}
         self._loading_since: float | None = None  # time-to-first-frame probe
 
     # --- QAbstractListModel ---
@@ -103,20 +121,198 @@ class TabManager(QAbstractListModel):
 
     @Slot(str, str)
     def openInNewTab(self, video_id: str, title: str):
-        """Context menu: background tab, active/current playback untouched."""
+        """Context menu: background tab — no player until activated."""
         queue = [QueueItem(video_id, title)]
         self._insert_tab(self._store.create(queue), queue)
 
     @Slot(str, str)
     def enqueue(self, video_id: str, title: str):
-        """Append to the active tab's queue; mpv appends only if that tab
-        owns mpv's playlist right now."""
         self._insert_into_queue(video_id, title, at_end=True)
 
     @Slot(str, str)
     def playNext(self, video_id: str, title: str):
-        """Insert right after the current item."""
         self._insert_into_queue(video_id, title, at_end=False)
+
+    @Slot(int)
+    def activate(self, row: int):
+        if not 0 <= row < len(self._tabs) or row == self._active:
+            return
+        self.persistActive()
+        self._touch_active()
+        self._set_active(row)
+        tab = self._tabs[row]
+        if tab.id in self._live:
+            # The browser feel: the player is alive and paused — just show it.
+            self._live[tab.id].last_active = self._now()
+            self.setActivePlayer.emit(tab.id)
+            self.videoStarted.emit()
+        else:
+            self._materialize_active()
+
+    @Slot(int)
+    def closeTab(self, row: int):
+        if not 0 <= row < len(self._tabs):
+            return
+        closing_active = row == self._active
+        self.beginRemoveRows(QModelIndex(), row, row)
+        tab = self._tabs.pop(row)
+        self.endRemoveRows()
+        self._store.delete(tab.id)
+        if tab.id in self._live:
+            self._freeze(tab.id)
+        if not closing_active:
+            if row < self._active:
+                self._set_active(self._active - 1)
+            return
+        if not self._tabs:
+            self._set_active(-1)
+            return
+        self._set_active(min(row, len(self._tabs) - 1))
+        new_tab = self._tabs[self._active]
+        if new_tab.id in self._live:
+            self._live[new_tab.id].last_active = self._now()
+            self.setActivePlayer.emit(new_tab.id)
+            self.videoStarted.emit()
+        else:
+            self._materialize_active()
+
+    # --- mpv observers (routed by tab id; the only mpv -> state flow) ---
+
+    @Slot(int, float)
+    def playbackTime(self, tab_id: int, secs: float):
+        # Per-frame: memory only; sqlite writes happen in persistActive().
+        if self._loading_since is not None and self._active >= 0 \
+                and self._tabs[self._active].id == tab_id:
+            print(f"tabs: first frame {time.monotonic() - self._loading_since:.1f}s"
+                  " after load command")
+            self._loading_since = None
+        row = self._row_of(tab_id)
+        if row is not None:
+            tab = self._tabs[row]
+            self._tabs[row] = Tab(tab.id, tab.queue, tab.queue_idx, secs)
+
+    @Slot(int, int)
+    def playlistPos(self, tab_id: int, pos: int):
+        if pos < 0:
+            return
+        row = self._row_of(tab_id)
+        live = self._live.get(tab_id)
+        if row is None or live is None:
+            return
+        tab = self._tabs[row]
+        if not tab.queue:
+            return
+        idx = min(live.offset + pos, len(tab.queue) - 1)
+        if idx != tab.queue_idx:
+            self._update_tab(row, Tab(tab.id, tab.queue, idx, 0.0))
+            self._store.save_state(tab.id, idx, 0.0)
+
+    @Slot(int, str)
+    def resolvedUrl(self, tab_id: int, resolved: str):
+        """What ytdl_hook resolved for a tab's current item (its player's
+        stream-open-filename), reported back by the bridge."""
+        if self._url_cache is None:
+            return
+        row = self._row_of(tab_id)
+        if row is None or not self._tabs[row].queue:
+            return
+        tab = self._tabs[row]
+        idx = min(max(0, tab.queue_idx), len(tab.queue) - 1)
+        self._url_cache.put(tab.queue[idx].video_id, resolved, self._now())
+
+    @Slot(int)
+    def loadFailed(self, tab_id: int):
+        """A load errored. If it rode a cached URL (stale despite the expiry
+        margin), drop the entries and retry once through the original page."""
+        live = self._live.get(tab_id)
+        row = self._row_of(tab_id)
+        if live is None or row is None or not live.used_cache:
+            return
+        if self._url_cache is not None:
+            for item in self._tabs[row].queue:
+                self._url_cache.invalidate(item.video_id)
+        live.used_cache = False
+        if row == self._active:
+            self._materialize_active(use_cache=False)
+
+    @Slot()
+    def persistActive(self):
+        if self._active >= 0:
+            tab = self._tabs[self._active]
+            self._store.save_state(tab.id, tab.queue_idx, tab.position_secs)
+        self._freeze_stale()
+
+    # --- internals ---
+
+    def _materialize_active(self, use_cache: bool = True):
+        tab = self._tabs[self._active]
+        if tab.id not in self._live:
+            self._ensure_capacity()
+            self._live[tab.id] = _LivePlayer(0, self._now())
+            self.createPlayer.emit(tab.id)
+        live = self._live[tab.id]
+        live.offset = min(max(0, tab.queue_idx), max(0, len(tab.queue) - 1))
+        live.used_cache = False
+        live.last_active = self._now()
+        self._loading_since = time.monotonic()
+        resolve = (lambda vid: self._resolve(live, vid)) if use_cache else None
+        cmds = materialize(tab, resolve)
+        self.setActivePlayer.emit(tab.id)
+        self.videoStarted.emit()
+        if not cmds:
+            return
+        # Stop first and drain before loading into a reused player.
+        # ecomono: mitigates (does not close) an iHD race — the decoder dies
+        # under zero-copy while mpv's render thread maps an in-flight frame
+        # (repro: main.py --stress). 50ms validated by that stress run.
+        self.mpvCommandFor.emit(tab.id, ["stop"])
+
+        def fire():
+            for cmd in cmds:
+                self.mpvCommandFor.emit(tab.id, cmd)
+
+        if self._materialize_delay_ms <= 0:
+            fire()
+        else:
+            QTimer.singleShot(self._materialize_delay_ms, fire)
+
+    def _ensure_capacity(self):
+        while len(self._live) >= self._live_cap:
+            active_id = (self._tabs[self._active].id
+                         if self._active >= 0 else None)
+            candidates = [tid for tid in self._live if tid != active_id]
+            if not candidates:
+                return
+            self._freeze(min(candidates,
+                             key=lambda tid: self._live[tid].last_active))
+
+    def _freeze(self, tab_id: int):
+        """Browser-style tab discard: the strip entry stays, the player goes.
+        State was persisted when the tab left the foreground."""
+        del self._live[tab_id]
+        self.destroyPlayer.emit(tab_id)
+
+    def _freeze_stale(self):
+        active_id = self._tabs[self._active].id if self._active >= 0 else None
+        now = self._now()
+        for tid in list(self._live):
+            if tid != active_id and \
+                    now - self._live[tid].last_active > self._freeze_ttl:
+                self._freeze(tid)
+
+    def _touch_active(self):
+        if self._active >= 0:
+            live = self._live.get(self._tabs[self._active].id)
+            if live is not None:
+                live.last_active = self._now()
+
+    def _resolve(self, live: _LivePlayer, video_id: str) -> str:
+        if self._url_cache is not None:
+            cached = self._url_cache.get(video_id, self._now())
+            if cached is not None:
+                live.used_cache = True
+                return cached
+        return WATCH_URL + video_id
 
     def _insert_into_queue(self, video_id: str, title: str, at_end: bool):
         if self._active < 0:
@@ -131,141 +327,15 @@ class TabManager(QAbstractListModel):
             self._active,
             Tab(tab.id, queue, tab.queue_idx, tab.position_secs),
         )
-        if self._materialized == tab.id:
+        live = self._live.get(tab.id)
+        if live is not None:
             flag = "append" if at_end else "insert-next"
-            self.mpvCommand.emit(["loadfile", self._resolve(video_id), flag])
+            self.mpvCommandFor.emit(
+                tab.id, ["loadfile", self._resolve(live, video_id), flag])
 
-    @Slot(int)
-    def activate(self, row: int):
-        if not 0 <= row < len(self._tabs):
-            return
-        already_playing = (
-            row == self._active
-            and self._materialized == self._tabs[row].id
-        )
-        if already_playing:
-            return
-        self.persistActive()
-        self._set_active(row)
-        self._materialize_active()
-
-    @Slot(int)
-    def closeTab(self, row: int):
-        if not 0 <= row < len(self._tabs):
-            return
-        closing_active = row == self._active
-        self.beginRemoveRows(QModelIndex(), row, row)
-        tab = self._tabs.pop(row)
-        self.endRemoveRows()
-        self._store.delete(tab.id)
-        if self._materialized == tab.id:
-            self._materialized = None
-        if not closing_active:
-            if row < self._active:
-                self._set_active(self._active - 1)
-            return
-        if not self._tabs:
-            self._set_active(-1)
-            self.mpvCommand.emit(["stop"])
-            return
-        self._set_active(min(row, len(self._tabs) - 1))
-        self._materialize_active()
-
-    # --- mpv observers (the only mpv -> state flow) ---
-
-    @Slot(float)
-    def playbackTime(self, secs: float):
-        # Per-frame: memory only; sqlite writes happen in persistActive().
-        if self._loading_since is not None:
-            print(f"tabs: first frame {time.monotonic() - self._loading_since:.1f}s"
-                  " after load command")
-            self._loading_since = None
-        if self._active >= 0:
-            tab = self._tabs[self._active]
-            self._tabs[self._active] = Tab(tab.id, tab.queue, tab.queue_idx, secs)
-
-    @Slot(int)
-    def playlistPos(self, pos: int):
-        if pos < 0 or self._active < 0:
-            return
-        tab = self._tabs[self._active]
-        if self._materialized != tab.id or not tab.queue:
-            return
-        idx = min(self._offset + pos, len(tab.queue) - 1)
-        if idx != tab.queue_idx:
-            self._update_tab(self._active, Tab(tab.id, tab.queue, idx, 0.0))
-            self._store.save_state(tab.id, idx, 0.0)
-
-    @Slot()
-    def persistActive(self):
-        if self._active >= 0:
-            tab = self._tabs[self._active]
-            self._store.save_state(tab.id, tab.queue_idx, tab.position_secs)
-
-    # --- resolved-stream cache (skips re-extraction on tab re-switch) ---
-
-    @Slot(str)
-    def resolvedUrl(self, resolved: str):
-        """What ytdl_hook resolved for the currently playing item (mpv's
-        stream-open-filename), reported back by the bridge."""
-        if self._url_cache is None or self._active < 0:
-            return
-        tab = self._tabs[self._active]
-        if self._materialized != tab.id or not tab.queue:
-            return
-        idx = min(max(0, tab.queue_idx), len(tab.queue) - 1)
-        self._url_cache.put(tab.queue[idx].video_id, resolved, self._now())
-
-    @Slot()
-    def loadFailed(self):
-        """A load errored. If it rode a cached URL (stale despite the expiry
-        margin), drop the entry and retry once through the original page."""
-        if not self._used_cache or self._active < 0:
-            return
-        tab = self._tabs[self._active]
-        if self._url_cache is not None:
-            for item in tab.queue:
-                self._url_cache.invalidate(item.video_id)
-        self._used_cache = False
-        self._materialize_active(use_cache=False)
-
-    def _resolve(self, video_id: str) -> str:
-        if self._url_cache is not None:
-            cached = self._url_cache.get(video_id, self._now())
-            if cached is not None:
-                self._used_cache = True
-                return cached
-        return WATCH_URL + video_id
-
-    # --- internals ---
-
-    def _materialize_active(self, use_cache: bool = True):
-        tab = self._tabs[self._active]
-        self._offset = min(max(0, tab.queue_idx), max(0, len(tab.queue) - 1))
-        self._materialized = tab.id
-        self._loading_since = time.monotonic()
-        self._used_cache = False
-        cmds = materialize(tab, self._resolve if use_cache else None)
-        if not cmds:
-            return
-        # Stop first and let the outgoing decoder tear down before loading.
-        # ecomono: mitigates (does not close) a driver race — the iHD decoder
-        # dies under zero-copy while mpv's render thread maps an in-flight
-        # frame (vaSyncSurface segfault, repro: main.py --stress). 50ms
-        # validated by that stress run; remove entirely when a driver/mpv
-        # update survives it.
-        self.mpvCommand.emit(["stop"])
-        # UI flips to the watch view immediately; the loadfiles follow.
-        self.videoStarted.emit()
-
-        def fire():
-            for cmd in cmds:
-                self.mpvCommand.emit(cmd)
-
-        if self._materialize_delay_ms <= 0:
-            fire()
-        else:
-            QTimer.singleShot(self._materialize_delay_ms, fire)
+    def _row_of(self, tab_id: int):
+        return next((i for i, t in enumerate(self._tabs) if t.id == tab_id),
+                    None)
 
     def _insert_tab(self, tab_id: int, queue: list[QueueItem]):
         row = len(self._tabs)

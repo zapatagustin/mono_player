@@ -3,7 +3,9 @@ import QtQuick.Controls.Basic
 import MpvBridge
 
 // TUI-style shell (DESIGN.md): flat gruvbox panels, one mono font, 28px bars,
-// vim-grammar keyboard, zero animations. Mouse works but never gates anything.
+// vim-grammar keyboard, zero animations. Tabs are browser-grade: a pool of
+// live paused players (TabManager caps and freezes them), so switching is
+// show/pause, not reload.
 Window {
     id: root
     width: 1280
@@ -86,15 +88,7 @@ Window {
 
     Connections {
         target: tabs
-        function onMpvCommand(cmd) { player.command(cmd) }
-        function onVideoStarted() {
-            root.watching = true
-            playerView.loading = true
-            playerView.vHeight = 0
-            playerView.vFps = 0
-            playerView.vFormat = ""
-            root.refocus()
-        }
+        function onVideoStarted() { root.watching = true; root.refocus() }
     }
 
     Column {
@@ -249,6 +243,7 @@ Window {
 
                     delegate: Item {
                         id: cell
+                        required property int index
                         required property string videoId
                         required property string title
                         required property string channel
@@ -317,7 +312,6 @@ Window {
                                 }
                             }
                         }
-                        required property int index
                         TapHandler {
                             acceptedButtons: Qt.LeftButton
                             onTapped: {
@@ -353,25 +347,27 @@ Window {
                 }
             }
 
+            // Player pool host: one live (paused) player per recent tab,
+            // created/destroyed by TabManager's pool signals.
             Item {
                 id: playerView
                 anchors.fill: parent
                 visible: root.watching
 
-                property real position: 0
-                property real duration: 0
-                property bool paused: false
-                property string decode: ""
-                property bool loading: false
-                property int volume: 100
-                property int vHeight: 0
-                property real vFps: 0
-                property string vFormat: ""
-                property string subLang: ""
-                readonly property string quality: vHeight > 0
-                    ? vHeight + "p" + (vFps > 0 ? Math.round(vFps) : "")
-                      + (vFormat !== "" ? " " + vFormat : "")
-                    : ""
+                property int activeTabId: -1
+                property var activePlayer: null
+
+                function refreshActivePlayer() {
+                    for (let i = 0; i < playersRepeater.count; i++) {
+                        const item = playersRepeater.itemAt(i)
+                        if (item && item.tabId === activeTabId) {
+                            activePlayer = item
+                            return
+                        }
+                    }
+                    activePlayer = null
+                }
+                onActiveTabIdChanged: refreshActivePlayer()
 
                 function fmt(s) {
                     s = Math.max(0, Math.floor(s))
@@ -383,82 +379,159 @@ Window {
                         : `${m}:${sec}`
                 }
 
-                MpvObject {
-                    id: player
-                    anchors.fill: parent
+                ListModel { id: playersModel }
 
-                    Component.onCompleted: {
-                        // ecomono: VP9-first. AV1 + zero-copy segfaults in the
-                        // iHD driver's Av1Pipeline on decoder teardown (repro:
-                        // main.py --stress). Re-prefer AV1 when a driver
-                        // update survives that stress run.
-                        player.setProperty("ytdl-format",
-                            "bv*[vcodec^=vp9][height<=?4320]+ba/bv*+ba/b")
-                        // Ask yt-dlp for subtitle tracks, else ytdl_hook adds
-                        // none and the subs key has nothing to cycle.
-                        player.setProperty("ytdl-raw-options",
-                            'sub-langs="es.*,en.*",write-subs=')
-                        // Runtime UI state arrives via async observers only —
-                        // synchronous getProperty during load deadlocks.
-                        player.observe("stream-open-filename")
-                        player.observe("volume")
-                        player.observe("video-params")
-                        player.observe("container-fps")
-                        player.observe("video-format")
-                        player.observe("current-tracks/sub/lang")
+                Connections {
+                    target: tabs
+                    function onCreatePlayer(tabId) {
+                        playersModel.append({ tabId: tabId })
                     }
-
-                    onEndFile: (error) => {
-                        if (error) {
-                            root.notify("load failed — retrying")
-                            tabs.loadFailed()
-                        }
+                    function onDestroyPlayer(tabId) {
+                        for (let i = 0; i < playersModel.count; i++)
+                            if (playersModel.get(i).tabId === tabId) {
+                                playersModel.remove(i)
+                                break
+                            }
+                        playerView.refreshActivePlayer()
                     }
-
-                    onPropertyChanged: (name, value) => {
-                        switch (name) {
-                        case "stream-open-filename":
-                            if (value) tabs.resolvedUrl(value)
-                            break
-                        case "volume":
-                            if (value !== undefined && value !== null)
-                                playerView.volume = Math.round(value)
-                            break
-                        case "video-params":
-                            playerView.vHeight = value && value.h ? value.h : 0
-                            break
-                        case "container-fps":
-                            playerView.vFps = value ?? 0; break
-                        case "video-format":
-                            playerView.vFormat = value ?? ""; break
-                        case "current-tracks/sub/lang":
-                            playerView.subLang = value ?? ""; break
-                        }
-                    }
-
-                    onPlaybackTimeChanged: (secs) => {
-                        tabs.playbackTime(secs)
-                        playerView.position = secs
-                        playerView.loading = false
-                    }
-                    onPlaylistPosChanged: (pos) => tabs.playlistPos(pos)
-                    onDurationChanged: (secs) => playerView.duration = secs
-                    onPauseChanged: (p) => playerView.paused = p
-                    onLogMessage: (prefix, level, text) => {
-                        // vd info is low-volume and carries the hw/sw
-                        // decode decision — always worth surfacing.
-                        if (level === "error" || level === "warn" || prefix === "vd")
-                            console.log(`[${prefix}] ${level}: ${text}`)
-                        if (prefix === "vd" && text.indexOf("hardware decoding") >= 0)
-                            playerView.decode = (text.match(/\((.+)\)/) ?? [,"hw"])[1]
-                        else if (prefix === "vd" && text.indexOf("software decoding") >= 0)
-                            playerView.decode = "sw"
+                    function onSetActivePlayer(tabId) {
+                        playerView.activeTabId = tabId
                     }
                 }
 
-                function bumpVolume(delta) {
-                    player.command(["add", "volume", delta])
-                    // display updates via the volume observer
+                Repeater {
+                    id: playersRepeater
+                    model: playersModel
+                    onItemAdded: playerView.refreshActivePlayer()
+
+                    delegate: Item {
+                        id: wrap
+                        required property int tabId
+                        anchors.fill: parent
+
+                        readonly property bool isActive:
+                            tabId === playerView.activeTabId
+                        visible: isActive
+
+                        property real position: 0
+                        property real duration: 0
+                        property bool paused: false
+                        property bool userPaused: false
+                        property bool loading: true
+                        property string decode: ""
+                        property int volume: 100
+                        property int vHeight: 0
+                        property real vFps: 0
+                        property string vFormat: ""
+                        property string subLang: ""
+                        readonly property string quality: vHeight > 0
+                            ? vHeight + "p" + (vFps > 0 ? Math.round(vFps) : "")
+                              + (vFormat !== "" ? " " + vFormat : "")
+                            : ""
+
+                        // Background tabs pause; foreground restores the
+                        // user's intent (browser semantics).
+                        onIsActiveChanged: p.command(
+                            ["set", "pause",
+                             isActive ? (userPaused ? "yes" : "no") : "yes"])
+
+                        function cmd(c) { p.command(c) }
+                        function togglePause() {
+                            userPaused = !paused
+                            p.command(["cycle", "pause"])
+                        }
+
+                        Connections {
+                            target: tabs
+                            function onMpvCommandFor(tabId, c) {
+                                if (tabId !== wrap.tabId)
+                                    return
+                                p.command(c)
+                                if (c[0] === "loadfile" && c[2] === "replace") {
+                                    wrap.loading = true
+                                    wrap.userPaused = false
+                                    wrap.vHeight = 0
+                                    wrap.vFps = 0
+                                    wrap.vFormat = ""
+                                }
+                            }
+                        }
+
+                        MpvObject {
+                            id: p
+                            anchors.fill: parent
+
+                            Component.onCompleted: {
+                                // ecomono: VP9-first. AV1 + zero-copy
+                                // segfaults in the iHD driver's Av1Pipeline
+                                // on decoder teardown (repro: --stress).
+                                p.setProperty("ytdl-format",
+                                    "bv*[vcodec^=vp9][height<=?4320]+ba/bv*+ba/b")
+                                // Subtitle tracks must be requested or
+                                // ytdl_hook adds none.
+                                p.setProperty("ytdl-raw-options",
+                                    'sub-langs="es.*,en.*",write-subs=')
+                                // Runtime UI state via async observers only —
+                                // synchronous getProperty during load deadlocks.
+                                p.observe("stream-open-filename")
+                                p.observe("volume")
+                                p.observe("video-params")
+                                p.observe("container-fps")
+                                p.observe("video-format")
+                                p.observe("current-tracks/sub/lang")
+                            }
+
+                            onPlaybackTimeChanged: (secs) => {
+                                tabs.playbackTime(wrap.tabId, secs)
+                                wrap.position = secs
+                                wrap.loading = false
+                            }
+                            onPlaylistPosChanged: (pos) =>
+                                tabs.playlistPos(wrap.tabId, pos)
+                            onDurationChanged: (secs) => wrap.duration = secs
+                            onPauseChanged: (paused) => wrap.paused = paused
+                            onEndFile: (error) => {
+                                if (error) {
+                                    tabs.loadFailed(wrap.tabId)
+                                    if (wrap.isActive)
+                                        root.notify("load failed — retrying")
+                                }
+                            }
+                            onPropertyChanged: (name, value) => {
+                                switch (name) {
+                                case "stream-open-filename":
+                                    if (value) tabs.resolvedUrl(wrap.tabId, value)
+                                    break
+                                case "volume":
+                                    if (value !== undefined && value !== null)
+                                        wrap.volume = Math.round(value)
+                                    break
+                                case "video-params":
+                                    wrap.vHeight = value && value.h ? value.h : 0
+                                    break
+                                case "container-fps":
+                                    wrap.vFps = value ?? 0; break
+                                case "video-format":
+                                    wrap.vFormat = value ?? ""; break
+                                case "current-tracks/sub/lang":
+                                    wrap.subLang = value ?? ""; break
+                                }
+                            }
+                            onLogMessage: (prefix, level, text) => {
+                                // vd info is low-volume and carries the hw/sw
+                                // decode decision — always worth surfacing.
+                                if (level === "error" || level === "warn"
+                                        || prefix === "vd")
+                                    console.log(`[${prefix}] ${level}: ${text}`)
+                                if (prefix === "vd"
+                                        && text.indexOf("hardware decoding") >= 0)
+                                    wrap.decode = (text.match(/\((.+)\)/) ?? [, "hw"])[1]
+                                else if (prefix === "vd"
+                                        && text.indexOf("software decoding") >= 0)
+                                    wrap.decode = "sw"
+                            }
+                        }
+                    }
                 }
 
                 Keys.onPressed: (event) => {
@@ -466,18 +539,20 @@ Window {
                         event.accepted = true
                         return
                     }
+                    const ap = playerView.activePlayer
+                    if (!ap) return
                     switch (event.key) {
-                    case Qt.Key_Space: player.command(["cycle", "pause"]); break
+                    case Qt.Key_Space: ap.togglePause(); break
                     case Qt.Key_H: case Qt.Key_Left:
-                        player.command(["seek", -5]); break
+                        ap.cmd(["seek", -5]); break
                     case Qt.Key_L: case Qt.Key_Right:
-                        player.command(["seek", 5]); break
-                    case Qt.Key_K: case Qt.Key_Up: bumpVolume(5); break
-                    case Qt.Key_J: case Qt.Key_Down: bumpVolume(-5); break
-                    case Qt.Key_M: player.command(["cycle", "mute"]); break
-                    case Qt.Key_S:
-                        player.command(["cycle", "sub"])
-                        break
+                        ap.cmd(["seek", 5]); break
+                    case Qt.Key_K: case Qt.Key_Up:
+                        ap.cmd(["add", "volume", 5]); break
+                    case Qt.Key_J: case Qt.Key_Down:
+                        ap.cmd(["add", "volume", -5]); break
+                    case Qt.Key_M: ap.cmd(["cycle", "mute"]); break
+                    case Qt.Key_S: ap.cmd(["cycle", "sub"]); break
                     case Qt.Key_F:
                         root.visibility = root.visibility === Window.FullScreen
                             ? Window.Windowed : Window.FullScreen
@@ -489,9 +564,9 @@ Window {
                     event.accepted = true
                 }
 
-                // Mouse never gates: click toggles pause, wheel seeks.
+                // Mouse never gates: click toggles pause.
                 TapHandler {
-                    onTapped: player.command(["cycle", "pause"])
+                    onTapped: playerView.activePlayer?.togglePause()
                 }
             }
         }
@@ -502,6 +577,8 @@ Window {
             width: parent.width
             height: th.barHeight
             color: th.bg1
+
+            readonly property var ap: playerView.activePlayer
 
             Row {
                 anchors.fill: parent
@@ -527,11 +604,13 @@ Window {
                     verticalAlignment: Text.AlignVCenter
                     leftPadding: 8
                     text: root.statusMsg !== "" ? root.statusMsg
-                        : root.watching && playerView.loading ? "loading…"
+                        : root.watching && statusline.ap && statusline.ap.loading
+                        ? "loading…"
                         : root.watching
                         ? "space pause · h/l seek · j/k vol · s subs · m mute · f full · gt/1-9 tab · x close · esc back"
                         : "hjkl move · enter play · t tab · a queue · p next · w later · / search · gt/1-9 tab · gs subs · gw later · gl login · q quit"
-                    color: root.statusMsg !== "" || (root.watching && playerView.loading)
+                    color: root.statusMsg !== ""
+                           || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim
                     font.pixelSize: th.fontSizeSmall
                     elide: Text.ElideRight
@@ -540,7 +619,7 @@ Window {
                 Row {
                     id: rightSegments
                     height: parent.height
-                    visible: root.watching
+                    visible: root.watching && statusline.ap !== null
 
                     Rectangle { width: 1; height: parent.height; color: th.bg2 }
                     Item {
@@ -553,8 +632,9 @@ Window {
                             height: 6
                             color: th.bg2
                             Rectangle {
-                                width: playerView.duration > 0
-                                    ? parent.width * Math.min(1, playerView.position / playerView.duration)
+                                width: statusline.ap && statusline.ap.duration > 0
+                                    ? parent.width * Math.min(1,
+                                        statusline.ap.position / statusline.ap.duration)
                                     : 0
                                 height: parent.height
                                 color: th.accent
@@ -567,8 +647,10 @@ Window {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 8
                         rightPadding: 8
-                        text: playerView.fmt(playerView.position) + " / "
-                              + playerView.fmt(playerView.duration)
+                        text: statusline.ap
+                            ? playerView.fmt(statusline.ap.position) + " / "
+                              + playerView.fmt(statusline.ap.duration)
+                            : ""
                         color: th.fg
                         font.pixelSize: th.fontSizeSmall
                     }
@@ -578,8 +660,10 @@ Window {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 8
                         rightPadding: 8
-                        text: (playerView.paused ? "||" : "|>")
-                              + `  vol ${playerView.volume}`
+                        text: statusline.ap
+                            ? (statusline.ap.paused ? "||" : "|>")
+                              + `  vol ${statusline.ap.volume}`
+                            : ""
                         color: th.fgDim
                         font.pixelSize: th.fontSizeSmall
                     }
@@ -589,10 +673,10 @@ Window {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 8
                         rightPadding: 8
-                        text: playerView.quality
+                        text: statusline.ap ? "sub " + statusline.ap.subLang : ""
                         color: th.fgDim
                         font.pixelSize: th.fontSizeSmall
-                        visible: playerView.quality !== ""
+                        visible: statusline.ap !== null && statusline.ap.subLang !== ""
                     }
                     Rectangle { width: 1; height: parent.height; color: th.bg2 }
                     Text {
@@ -600,10 +684,10 @@ Window {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 8
                         rightPadding: 8
-                        text: "sub " + playerView.subLang
+                        text: statusline.ap ? statusline.ap.quality : ""
                         color: th.fgDim
                         font.pixelSize: th.fontSizeSmall
-                        visible: playerView.subLang !== ""
+                        visible: statusline.ap !== null && statusline.ap.quality !== ""
                     }
                     Rectangle { width: 1; height: parent.height; color: th.bg2 }
                     Text {
@@ -611,10 +695,11 @@ Window {
                         verticalAlignment: Text.AlignVCenter
                         leftPadding: 8
                         rightPadding: 8
-                        text: playerView.decode
-                        color: playerView.decode === "sw" ? th.red : th.green
+                        text: statusline.ap ? statusline.ap.decode : ""
+                        color: statusline.ap && statusline.ap.decode === "sw"
+                            ? th.red : th.green
                         font.pixelSize: th.fontSizeSmall
-                        visible: playerView.decode !== ""
+                        visible: statusline.ap !== null && statusline.ap.decode !== ""
                     }
                 }
             }

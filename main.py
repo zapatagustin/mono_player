@@ -147,7 +147,14 @@ def main() -> int:
         cycle = [0]
 
         def stress():
-            tabs.playVideo(vids[cycle[0] % 3], f"stress {cycle[0]}")
+            i = cycle[0]
+            if i < 3:  # build up the pool
+                tabs.openInNewTab(vids[i], f"stress tab {i}")
+                tabs.activate(i)
+            elif i % 4 == 3:  # reload into the active tab's player
+                tabs.playVideo(vids[i % 3], f"stress replace {i}")
+            else:  # live switch between paused players
+                tabs.activate(i % 3)
             cycle[0] += 1
             print(f"stress: cycle {cycle[0]}")
 
