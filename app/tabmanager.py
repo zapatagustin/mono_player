@@ -44,7 +44,7 @@ class TabManager(QAbstractListModel):
     videoStarted = Signal()
     activeIndexChanged = Signal()
 
-    def __init__(self, store: TabStore, materialize_delay_ms: int = 150,
+    def __init__(self, store: TabStore, materialize_delay_ms: int = 50,
                  url_cache=None, now_fn=time.time, parent=None):
         super().__init__(parent)
         self._store = store
@@ -251,14 +251,16 @@ class TabManager(QAbstractListModel):
         # Stop first and let the outgoing decoder tear down before loading.
         # ecomono: mitigates (does not close) a driver race — the iHD decoder
         # dies under zero-copy while mpv's render thread maps an in-flight
-        # frame (vaSyncSurface segfault, repro: main.py --stress). Remove the
-        # delay when a driver/mpv update survives that stress run.
+        # frame (vaSyncSurface segfault, repro: main.py --stress). 50ms
+        # validated by that stress run; remove entirely when a driver/mpv
+        # update survives it.
         self.mpvCommand.emit(["stop"])
+        # UI flips to the watch view immediately; the loadfiles follow.
+        self.videoStarted.emit()
 
         def fire():
             for cmd in cmds:
                 self.mpvCommand.emit(cmd)
-            self.videoStarted.emit()
 
         if self._materialize_delay_ms <= 0:
             fire()
