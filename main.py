@@ -32,6 +32,7 @@ from net import make_client  # noqa: E402
 from tabmanager import TabManager  # noqa: E402
 from tabstore import TabStore  # noqa: E402
 from thumbs import ThumbCache  # noqa: E402
+from urlcache import StreamUrlCache  # noqa: E402
 
 # The EmbeddedSetup login page expects a mobile UA; MinuteMaid is the marker
 # the embedded-setup flow (microG, Aurora) identifies itself with.
@@ -93,7 +94,7 @@ def main() -> int:
         make_client(), FeedStore(data_dir / "mono.db"),
         ThumbCache(cache_dir / "thumbs"), auth=auth,
     )
-    tabs = TabManager(tab_store)
+    tabs = TabManager(tab_store, url_cache=StreamUrlCache())
 
     login_profile = None
     if WEBENGINE:

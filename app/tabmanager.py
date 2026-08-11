@@ -20,18 +20,21 @@ TITLE, ACTIVE = range(Qt.ItemDataRole.UserRole + 1, Qt.ItemDataRole.UserRole + 3
 WATCH_URL = "https://www.youtube.com/watch?v="
 
 
-def materialize(tab: Tab) -> list[list]:
+def materialize(tab: Tab, resolve=None) -> list[list]:
     """Commands that load a tab into mpv: current item replaces the playlist
     (resume position as a per-item option), upcoming items append so mpv can
-    auto-advance. Earlier items live only in sqlite."""
+    auto-advance. Earlier items live only in sqlite. `resolve` maps a
+    video_id to a URL (cached stream or watch page); default is the page."""
+    if resolve is None:
+        resolve = lambda vid: WATCH_URL + vid  # noqa: E731
     if not tab.queue:
         return []
     idx = min(max(0, tab.queue_idx), len(tab.queue) - 1)
-    current = ["loadfile", WATCH_URL + tab.queue[idx].video_id, "replace"]
+    current = ["loadfile", resolve(tab.queue[idx].video_id), "replace"]
     if tab.position_secs > 0:
         current += [-1, {"start": str(tab.position_secs)}]
     return [current] + [
-        ["loadfile", WATCH_URL + item.video_id, "append"]
+        ["loadfile", resolve(item.video_id), "append"]
         for item in tab.queue[idx + 1:]
     ]
 
@@ -42,10 +45,13 @@ class TabManager(QAbstractListModel):
     activeIndexChanged = Signal()
 
     def __init__(self, store: TabStore, materialize_delay_ms: int = 150,
-                 parent=None):
+                 url_cache=None, now_fn=time.time, parent=None):
         super().__init__(parent)
         self._store = store
         self._materialize_delay_ms = materialize_delay_ms
+        self._url_cache = url_cache
+        self._now = now_fn
+        self._used_cache = False  # last materialization rode cached URLs
         self._tabs, active_id = store.load()
         self._active = next(
             (i for i, t in enumerate(self._tabs) if t.id == active_id), -1
@@ -127,7 +133,7 @@ class TabManager(QAbstractListModel):
         )
         if self._materialized == tab.id:
             flag = "append" if at_end else "insert-next"
-            self.mpvCommand.emit(["loadfile", WATCH_URL + video_id, flag])
+            self.mpvCommand.emit(["loadfile", self._resolve(video_id), flag])
 
     @Slot(int)
     def activate(self, row: int):
@@ -196,14 +202,50 @@ class TabManager(QAbstractListModel):
             tab = self._tabs[self._active]
             self._store.save_state(tab.id, tab.queue_idx, tab.position_secs)
 
+    # --- resolved-stream cache (skips re-extraction on tab re-switch) ---
+
+    @Slot(str)
+    def resolvedUrl(self, resolved: str):
+        """What ytdl_hook resolved for the currently playing item (mpv's
+        stream-open-filename), reported back by the bridge."""
+        if self._url_cache is None or self._active < 0:
+            return
+        tab = self._tabs[self._active]
+        if self._materialized != tab.id or not tab.queue:
+            return
+        idx = min(max(0, tab.queue_idx), len(tab.queue) - 1)
+        self._url_cache.put(tab.queue[idx].video_id, resolved, self._now())
+
+    @Slot()
+    def loadFailed(self):
+        """A load errored. If it rode a cached URL (stale despite the expiry
+        margin), drop the entry and retry once through the original page."""
+        if not self._used_cache or self._active < 0:
+            return
+        tab = self._tabs[self._active]
+        if self._url_cache is not None:
+            for item in tab.queue:
+                self._url_cache.invalidate(item.video_id)
+        self._used_cache = False
+        self._materialize_active(use_cache=False)
+
+    def _resolve(self, video_id: str) -> str:
+        if self._url_cache is not None:
+            cached = self._url_cache.get(video_id, self._now())
+            if cached is not None:
+                self._used_cache = True
+                return cached
+        return WATCH_URL + video_id
+
     # --- internals ---
 
-    def _materialize_active(self):
+    def _materialize_active(self, use_cache: bool = True):
         tab = self._tabs[self._active]
         self._offset = min(max(0, tab.queue_idx), max(0, len(tab.queue) - 1))
         self._materialized = tab.id
         self._loading_since = time.monotonic()
-        cmds = materialize(tab)
+        self._used_cache = False
+        cmds = materialize(tab, self._resolve if use_cache else None)
         if not cmds:
             return
         # Stop first and let the outgoing decoder tear down before loading.

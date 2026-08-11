@@ -400,6 +400,7 @@ Window {
                             'sub-langs="es.*,en.*",write-subs=')
                         // Runtime UI state arrives via async observers only —
                         // synchronous getProperty during load deadlocks.
+                        player.observe("stream-open-filename")
                         player.observe("volume")
                         player.observe("video-params")
                         player.observe("container-fps")
@@ -407,8 +408,18 @@ Window {
                         player.observe("current-tracks/sub/lang")
                     }
 
+                    onEndFile: (error) => {
+                        if (error) {
+                            root.notify("load failed — retrying")
+                            tabs.loadFailed()
+                        }
+                    }
+
                     onPropertyChanged: (name, value) => {
                         switch (name) {
+                        case "stream-open-filename":
+                            if (value) tabs.resolvedUrl(value)
+                            break
                         case "volume":
                             if (value !== undefined && value !== null)
                                 playerView.volume = Math.round(value)

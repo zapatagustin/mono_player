@@ -33,6 +33,7 @@ signals:
     void durationChanged(double secs);
     void pauseChanged(bool paused);
     void propertyChanged(QString name, QVariant value);
+    void endFile(bool error);
     void logMessage(QString prefix, QString level, QString text);
 
 private slots:

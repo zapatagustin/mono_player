@@ -226,6 +226,11 @@ void MpvObject::handleEvent(mpv_event *event)
             emit pauseChanged(*static_cast<int *>(prop->data) != 0);
         break;
     }
+    case MPV_EVENT_END_FILE: {
+        auto *ef = static_cast<mpv_event_end_file *>(event->data);
+        emit endFile(ef->reason == MPV_END_FILE_REASON_ERROR);
+        break;
+    }
     case MPV_EVENT_LOG_MESSAGE: {
         auto *msg = static_cast<mpv_event_log_message *>(event->data);
         emit logMessage(QString::fromUtf8(msg->prefix),

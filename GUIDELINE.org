@@ -158,6 +158,11 @@ Three distinct structures — do not merge them:
 - Fetch visible + =cacheBuffer= only; never prefetch a 200-item feed.
 - Cold start: paint the cached feed from sqlite before any network — first
   content in ~200ms perceived, fetch continues behind it.
+- Tab re-switch rides an in-memory cache of resolved stream URLs (what
+  ytdl_hook wrote to =stream-open-filename=), valid until the googlevideo
+  =expire== stamp minus a margin: 2.8s extraction on first play, ~0-0.9s
+  on return. A stale cached URL error invalidates and retries once via
+  the original page (=TabManager.loadFailed=).
 
 * Format selection
 

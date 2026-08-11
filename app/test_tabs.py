@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tabstore import QueueItem, Tab, TabStore
 from tabmanager import TabManager, materialize
+from urlcache import StreamUrlCache
 
 
 def make_store(tmp):
@@ -197,9 +198,49 @@ def test_enqueue_playnext():
     print("enqueue/play-next: ok")
 
 
+def test_resolved_url_cache():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        cache = StreamUrlCache()
+        m = TabManager(store, materialize_delay_ms=0, url_cache=cache,
+                       now_fn=lambda: 1000.0)
+        cmds = []
+        m.mpvCommand.connect(cmds.append)
+
+        # First play: normal watch URL (nothing cached yet); mpv resolves
+        # and the bridge reports the stream back.
+        m.playVideo("aaaaaaaaaaa", "A")
+        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
+        resolved = "https://rr1.googlevideo.com/videoplayback?expire=1704067200"
+        m.resolvedUrl(resolved)
+
+        # Switch away and back: the cached stream loads, no re-extraction.
+        m.openInNewTab("bbbbbbbbbbb", "B")
+        m.activate(1)
+        cmds.clear()
+        m.activate(0)
+        assert cmds == [["stop"], ["loadfile", resolved, "replace"]]
+
+        # Cached stream failed (stale despite margin): invalidate and
+        # re-materialize through the original URL — once, no retry loop.
+        cmds.clear()
+        m.loadFailed()
+        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
+        cmds.clear()
+        m.loadFailed()
+        assert cmds == []
+
+        # Enqueue of an already-seen video also rides the cache.
+        m.resolvedUrl(resolved)
+        m.enqueue("aaaaaaaaaaa", "again")  # queue grows on the active tab
+        assert cmds[-1] == ["loadfile", resolved, "append"]
+    print("resolved url cache: ok")
+
+
 if __name__ == "__main__":
     test_store()
     test_materialize()
     test_manager()
     test_enqueue_playnext()
+    test_resolved_url_cache()
     print("all checks passed")
