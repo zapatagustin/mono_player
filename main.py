@@ -92,8 +92,8 @@ def main() -> int:
         QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
     )
     tab_store = TabStore(data_dir / "mono.db")
-    auth = AuthManager(tab_store)
     client = make_client()
+    auth = AuthManager(tab_store, client=client)
     thumb_cache = ThumbCache(cache_dir / "thumbs")
     feed = FeedModel(
         client, FeedStore(data_dir / "mono.db"), thumb_cache, auth=auth,
@@ -106,6 +106,8 @@ def main() -> int:
     # they load when their panel opens.
     tabs.currentVideoChanged.connect(related.load)
     tabs.currentVideoChanged.connect(comments.setCurrent)
+    # Switching channel changes the personalized surface — reload home.
+    auth.channelChanged.connect(lambda _name: feed.loadHome())
 
     engine = QQmlApplicationEngine()
 

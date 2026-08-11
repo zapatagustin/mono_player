@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtNetwork import QNetworkCookie
 
 from auth import AuthManager, cookie_token
+from innertube import Channel, parse_accounts_list
 from innertube import Video, parse_subscriptions
 from tabstore import TabStore
 
@@ -88,6 +89,38 @@ def make_auth(store, kr, exchange=None, oauth=None, now=None):
     )
 
 
+def account_item(name, gaia, selected=False, has_channel=True,
+                 delegation="GAIA_DELEGATION_TYPE_LATE"):
+    return {"accountItem": {
+        "accountName": {"runs": [{"text": name}]},
+        "isSelected": selected,
+        "hasChannel": has_channel,
+        "serviceEndpoint": {"signInEndpoint": {"directSigninIdentity": {
+            "effectiveObfuscatedGaiaId": gaia,
+            "gaiaDelegationType": delegation,
+        }}},
+    }}
+
+
+def test_parse_accounts_list():
+    data = {"anything": [
+        account_item("Personal", "112910", selected=True, has_channel=False,
+                     delegation="GAIA_DELEGATION_TYPE_NONE"),
+        account_item("El Mono", "113497"),
+        {"accountItem": {"accountName": "garbage"}},
+    ]}
+    chans = parse_accounts_list(data)
+    assert chans == [
+        Channel("Personal", "112910", True, False),
+        Channel("El Mono", "113497", False, True),
+    ]
+    # delegated flag: NONE means base identity (no X-Goog-PageId header).
+    assert not chans[0].delegated and chans[1].delegated
+    assert parse_accounts_list({}) == []
+    assert parse_accounts_list(None) == []
+    print("accounts list parser: ok")
+
+
 def test_auth_manager():
     with tempfile.TemporaryDirectory() as tmp:
         store = TabStore(Path(tmp) / "mono.db")
@@ -159,7 +192,52 @@ def test_auth_manager():
     print("auth manager: ok")
 
 
+def test_channel_cycle():
+    import innertube
+
+    async def channels_fn(client, bearer):
+        return [
+            Channel("Personal", "112910", True, False),
+            Channel("El Mono", "113497", False, True),
+        ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TabStore(Path(tmp) / "mono.db")
+        kr = FakeKeyring()
+        kr.set_password("mono_player", "a@b.c", "aas_et/master")
+        store.meta_set("auth_email", "a@b.c")
+        m = make_auth(store, kr)
+        m._channels_fn = channels_fn
+        names = []
+        m.channelChanged.connect(names.append)
+
+        # Cycle: Personal (base) -> El Mono (delegated, header set).
+        asyncio.run(m._cycle())
+        assert names == ["El Mono"]
+        assert store.meta_get("page_id") == "113497"
+        assert innertube._page_id == "113497"
+
+        # Cycle again: back to the base identity (no header).
+        asyncio.run(m._cycle())
+        assert names == ["El Mono", "Personal"]
+        assert store.meta_get("page_id") in ("", None)
+        assert innertube._page_id == ""
+
+        # A fresh manager restores the persisted channel on init.
+        asyncio.run(m._cycle())  # -> El Mono again
+        m2 = make_auth(store, kr)
+        assert innertube._page_id == "113497"
+        assert m2.channelName == "El Mono"
+
+        # Logout clears the delegation.
+        m2.logout()
+        assert innertube._page_id == ""
+    print("channel cycle: ok")
+
+
 if __name__ == "__main__":
     test_parse_subscriptions()
+    test_parse_accounts_list()
     test_auth_manager()
+    test_channel_cycle()
     print("all checks passed")

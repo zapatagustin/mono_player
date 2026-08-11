@@ -70,6 +70,10 @@ Window {
                 if (auth.loggedIn) feed.loadPlaylists()
                 else root.notify("login required (gl)")
                 root.watching = false; return true
+            case Qt.Key_A:
+                if (auth.loggedIn) auth.cycleChannel()
+                else root.notify("login required (gl)")
+                return true
             case Qt.Key_L:
                 if (!authAvailable) { root.notify("webengine missing"); return true }
                 if (auth.loggedIn) { auth.logout(); root.notify("signed out") }
@@ -118,6 +122,11 @@ Window {
     Connections {
         target: feed
         function onMessage(msg) { root.notify(msg) }
+    }
+    Connections {
+        target: auth
+        function onChannelChanged(name) { root.notify("channel: " + name) }
+        function onLoginError(msg) { root.notify(msg) }
     }
 
     Column {
@@ -929,6 +938,25 @@ Window {
                 }
                 Rectangle { width: 1; height: parent.height; color: th.bg2 }
 
+                // Acting-as channel (brand account), when one is selected.
+                Text {
+                    id: channelTag
+                    width: auth.channelName !== "" ? implicitWidth + 16 : 0
+                    height: parent.height
+                    visible: width > 0
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 8
+                    rightPadding: 8
+                    text: "as " + auth.channelName
+                    color: th.fgDim
+                    font.pixelSize: th.fontSizeSmall
+                }
+                Rectangle {
+                    width: channelTag.visible ? 1 : 0
+                    height: parent.height
+                    color: th.bg2
+                }
+
                 // Feed context (what the grid is showing) while browsing.
                 Text {
                     id: contextTag
@@ -959,7 +987,7 @@ Window {
                         ? "loading…"
                         : root.watching
                         ? "space pause · h/l seek · j/k vol · r related · c comments · gc channel · S subscribe · m mute · f full · gt/1-9 tab · esc back"
-                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · t/a/p/w/S act · esc video · q quit"
+                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim

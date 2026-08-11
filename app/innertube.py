@@ -197,18 +197,19 @@ EDIT_PLAYLIST_URL = "https://www.youtube.com/youtubei/v1/browse/edit_playlist"
 
 
 def _account_headers(bearer: str) -> dict:
-    return {
+    headers = {
         "authorization": f"Bearer {bearer}",
         "user-agent": ANDROID_UA,
         "content-type": "application/json",
     }
+    return headers
 
 
 async def watch_later(client, bearer: str) -> list[Video]:
     """The account's real WL playlist (browseId VL + playlist id)."""
     resp = await client.post(
         BROWSE_URL,
-        json={"context": ANDROID_CONTEXT, "browseId": "VLWL"},
+        json={"context": _account_context(), "browseId": "VLWL"},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
@@ -219,7 +220,7 @@ async def add_to_watch_later(client, bearer: str, video_id: str) -> bool:
     resp = await client.post(
         EDIT_PLAYLIST_URL,
         json={
-            "context": ANDROID_CONTEXT,
+            "context": _account_context(),
             "playlistId": "WL",
             "actions": [{"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id}],
         },
@@ -556,7 +557,7 @@ async def account_feed(client, bearer: str, browse_id: str) -> list[Video]:
     compactVideoRenderer."""
     resp = await client.post(
         BROWSE_URL,
-        json={"context": ANDROID_CONTEXT, "browseId": browse_id},
+        json={"context": _account_context(), "browseId": browse_id},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
@@ -567,7 +568,7 @@ async def account_feed(client, bearer: str, browse_id: str) -> list[Video]:
 async def my_playlists(client, bearer: str) -> list[Video]:
     resp = await client.post(
         BROWSE_URL,
-        json={"context": ANDROID_CONTEXT, "browseId": "FEplaylist_aggregation"},
+        json={"context": _account_context(), "browseId": "FEplaylist_aggregation"},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
@@ -577,11 +578,69 @@ async def my_playlists(client, bearer: str) -> list[Video]:
 async def playlist_videos(client, bearer: str, playlist_id: str) -> list[Video]:
     resp = await client.post(
         BROWSE_URL,
-        json={"context": ANDROID_CONTEXT, "browseId": "VL" + playlist_id},
+        json={"context": _account_context(), "browseId": "VL" + playlist_id},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
     return parse_playlist(resp.json())
+
+
+@dataclass(frozen=True)
+class Channel:
+    name: str
+    gaia_id: str          # effectiveObfuscatedGaiaId — the delegation id
+    selected: bool
+    delegated: bool       # False = base identity (no X-Goog-PageId header)
+
+
+ACCOUNTS_LIST_URL = "https://www.youtube.com/youtubei/v1/account/accounts_list"
+
+# Active channel delegation, module-level on purpose: every account
+# endpoint flows through _account_context, and threading a page id through
+# each call site buys nothing in a single-interpreter app. Delegation rides
+# context.user.onBehalfOfUser (the X-Goog-PageId header gets 401 with a
+# gpsoauth Bearer).
+_page_id = ""
+
+
+def set_page_id(page_id: str) -> None:
+    global _page_id
+    _page_id = page_id or ""
+
+
+def _account_context() -> dict:
+    if not _page_id:
+        return ANDROID_CONTEXT
+    return {**ANDROID_CONTEXT, "user": {"onBehalfOfUser": _page_id}}
+
+
+def parse_accounts_list(data) -> list[Channel]:
+    channels = []
+    for _, item in _find_renderers(data, frozenset({"accountItem"})):
+        name = _text(item.get("accountName"))
+        identity = _walk(item, "serviceEndpoint", "signInEndpoint",
+                         "directSigninIdentity")
+        gaia = _walk(identity, "effectiveObfuscatedGaiaId")
+        if name is None or not isinstance(gaia, str) or not gaia:
+            continue
+        delegation = _walk(identity, "gaiaDelegationType")
+        channels.append(Channel(
+            name,
+            gaia,
+            bool(item.get("isSelected")),
+            delegation != "GAIA_DELEGATION_TYPE_NONE",
+        ))
+    return channels
+
+
+async def list_channels(client, bearer: str) -> list[Channel]:
+    resp = await client.post(
+        ACCOUNTS_LIST_URL,
+        json={"context": ANDROID_CONTEXT},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return parse_accounts_list(resp.json())
 
 
 SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"
@@ -590,7 +649,7 @@ SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"
 async def subscribe(client, bearer: str, channel_id: str) -> bool:
     resp = await client.post(
         SUBSCRIBE_URL,
-        json={"context": ANDROID_CONTEXT, "channelIds": [channel_id]},
+        json={"context": _account_context(), "channelIds": [channel_id]},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
@@ -601,7 +660,7 @@ async def subscriptions(client, bearer: str) -> list[Video]:
     """Fetch the account's subscriptions feed. Requires a Bearer token."""
     resp = await client.post(
         BROWSE_URL,
-        json={"context": ANDROID_CONTEXT, "browseId": "FEsubscriptions"},
+        json={"context": _account_context(), "browseId": "FEsubscriptions"},
         headers={
             "authorization": f"Bearer {bearer}",
             "user-agent": ANDROID_UA,

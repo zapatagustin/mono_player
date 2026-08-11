@@ -9,6 +9,8 @@ import time
 
 from PySide6.QtCore import Property, QObject, Signal, Slot
 
+import innertube
+
 KEYRING_SERVICE = "mono_player"
 
 # InnerTube ANDROID scope: the official YouTube app's oauth service triplet.
@@ -33,9 +35,10 @@ class AuthManager(QObject):
     loggedInChanged = Signal()
     showLoginChanged = Signal()
     loginError = Signal(str)
+    channelChanged = Signal(str)  # active YouTube channel (brand) name
 
-    def __init__(self, store, keyring_mod=None, exchange_fn=None, oauth_fn=None,
-                 now_fn=None, parent=None):
+    def __init__(self, store, client=None, keyring_mod=None, exchange_fn=None,
+                 oauth_fn=None, now_fn=None, parent=None):
         super().__init__(parent)
         if keyring_mod is None:
             import keyring as keyring_mod
@@ -55,7 +58,13 @@ class AuthManager(QObject):
             store.meta_set("android_id", aid)
         self._android_id = aid
 
+        self._client = client
+        self._channels_fn = innertube.list_channels
         self._email = store.meta_get("auth_email")
+        # Restore the active channel delegation before any account fetch.
+        self._page_id = store.meta_get("page_id") or ""
+        self._channel_name = store.meta_get("channel_name") or ""
+        innertube.set_page_id(self._page_id)
         self._pending_email = None
         self._show_login = False
         self._bearer = None
@@ -139,6 +148,46 @@ class AuthManager(QObject):
         )
         return auth
 
+    # --- channel (brand account) switching ---
+
+    @Slot()
+    def cycleChannel(self):
+        asyncio.get_event_loop().create_task(self._cycle())
+
+    async def _cycle(self):
+        bearer = await self.bearer()
+        if bearer is None:
+            self.loginError.emit("login required (gl)")
+            return
+        try:
+            channels = await self._channels_fn(self._client, bearer)
+        except Exception as exc:
+            print(f"auth: channel list failed: {exc!r}")
+            self.loginError.emit("channel list failed")
+            return
+        if len(channels) < 2:
+            self.loginError.emit("only one channel on this account")
+            return
+        # Match the current channel locally (isSelected may not reflect the
+        # delegation header), then step to the next one.
+        current = next(
+            (i for i, c in enumerate(channels)
+             if (c.gaia_id if c.delegated else "") == self._page_id), 0)
+        target = channels[(current + 1) % len(channels)]
+        self._set_channel(target.gaia_id if target.delegated else "",
+                          target.name)
+        self.channelChanged.emit(target.name)
+
+    def _set_channel(self, page_id: str, name: str):
+        self._page_id = page_id
+        self._channel_name = name
+        self._store.meta_set("page_id", page_id)
+        self._store.meta_set("channel_name", name)
+        innertube.set_page_id(page_id)
+
+    channelName = Property(str, lambda s: s._channel_name,
+                           notify=channelChanged)
+
     @Slot()
     def logout(self):
         if self._email is not None:
@@ -149,6 +198,7 @@ class AuthManager(QObject):
         self._store.meta_set("auth_email", None)
         self._email = None
         self._bearer = None
+        self._set_channel("", "")
         self.loggedInChanged.emit()
 
     def _set_show_login(self, value: bool):

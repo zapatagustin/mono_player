@@ -96,6 +96,8 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `1`–`9` | switch to tab N |
 | `gt` / `gT` | next / previous tab |
 | `gs` / `gw` | subscriptions / watch-later feed (login required) |
+| `gh` / `gy` / `gp` | personalized home / history / playlists (login required) |
+| `ga` | cycle the acting YouTube channel (brand accounts); statusline shows `as <name>` |
 | `gl` | sign in (email prompt, then webview) — or sign out when logged in |
 | `x` | close active tab |
 | `q` | quit |
