@@ -3,7 +3,15 @@ resolve to local file URLs so no Python runs in bindings during scroll."""
 
 import asyncio
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QUrl, Slot
+from PySide6.QtCore import (
+    Property,
+    QAbstractListModel,
+    QModelIndex,
+    Qt,
+    QUrl,
+    Signal,
+    Slot,
+)
 
 import innertube
 import net
@@ -17,6 +25,9 @@ VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB, CHANNEL_ID = range(
 
 
 class FeedModel(QAbstractListModel):
+    contextChanged = Signal()
+    message = Signal(str)  # user-facing toast, shown in the statusline
+
     def __init__(self, client, store: FeedStore, cache: ThumbCache, auth=None,
                  parent=None):
         super().__init__(parent)
@@ -24,6 +35,8 @@ class FeedModel(QAbstractListModel):
         self._store = store
         self._cache = cache
         self._auth = auth
+        self._context_label = ""
+        self._context_channel_id = ""
         self._thumbs: dict[str, str] = {}  # video_id -> local file URL
         self._pending: set[str] = set()
         # Cold start: paint the cached feed before any network.
@@ -91,12 +104,12 @@ class FeedModel(QAbstractListModel):
         if self._auth is not None:
             asyncio.create_task(self._load_subscriptions())
 
-    @Slot(str)
-    def loadChannel(self, browse_id: str):
+    @Slot(str, str)
+    def loadChannel(self, browse_id: str, name: str = ""):
         if browse_id:
-            asyncio.create_task(self._load_channel(browse_id))
+            asyncio.create_task(self._load_channel(browse_id, name))
 
-    async def _load_channel(self, browse_id: str):
+    async def _load_channel(self, browse_id: str, name: str):
         try:
             videos = await innertube.channel_videos(self._client, browse_id)
         except Exception as exc:
@@ -104,6 +117,34 @@ class FeedModel(QAbstractListModel):
             return
         print(f"feed: {len(videos)} channel videos")
         self._set_videos(videos)
+        self._set_context("channel: " + (name or browse_id), browse_id)
+
+    @Slot(str)
+    def subscribeChannel(self, browse_id: str):
+        if browse_id and self._auth is not None:
+            asyncio.create_task(self._subscribe(browse_id))
+
+    async def _subscribe(self, browse_id: str):
+        bearer = await self._auth.bearer()
+        if bearer is None:
+            self.message.emit("login required (gl)")
+            return
+        try:
+            await innertube.subscribe(self._client, bearer, browse_id)
+            self.message.emit("subscribed")
+        except Exception as exc:
+            print(f"feed: subscribe failed: {exc!r}")
+            self.message.emit("subscribe failed")
+
+    def _set_context(self, label: str, channel_id: str = ""):
+        self._context_label = label
+        self._context_channel_id = channel_id
+        self.contextChanged.emit()
+
+    contextLabel = Property(str, lambda s: s._context_label,
+                            notify=contextChanged)
+    contextChannelId = Property(str, lambda s: s._context_channel_id,
+                                notify=contextChanged)
 
     @Slot()
     def loadWatchLater(self):
@@ -126,6 +167,7 @@ class FeedModel(QAbstractListModel):
             return
         print(f"feed: {len(videos)} videos for {query!r}")
         self._set_videos(videos)
+        self._set_context("search: " + query)
 
     async def _load_subscriptions(self):
         await self._load_account_feed(innertube.subscriptions, "subscriptions")
@@ -142,6 +184,7 @@ class FeedModel(QAbstractListModel):
             return
         print(f"feed: {len(videos)} {label} videos")
         self._set_videos(videos)
+        self._set_context(label)
 
     async def _add_watch_later(self, video_id: str):
         bearer = await self._auth.bearer()

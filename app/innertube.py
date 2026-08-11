@@ -373,6 +373,19 @@ def parse_subscriptions(data) -> list[Video]:
     return videos
 
 
+SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"
+
+
+async def subscribe(client, bearer: str, channel_id: str) -> bool:
+    resp = await client.post(
+        SUBSCRIBE_URL,
+        json={"context": ANDROID_CONTEXT, "channelIds": [channel_id]},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return True
+
+
 async def subscriptions(client, bearer: str) -> list[Video]:
     """Fetch the account's subscriptions feed. Requires a Bearer token."""
     resp = await client.post(

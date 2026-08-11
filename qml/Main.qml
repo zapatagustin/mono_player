@@ -66,10 +66,10 @@ Window {
             case Qt.Key_C: {
                 const cid = root.watching ? related.channelId
                     : (grid.currentItem ? grid.currentItem.channelId : "")
+                const cname = root.watching ? related.channelName
+                    : (grid.currentItem ? grid.currentItem.channel : "")
                 if (cid !== "") {
-                    feed.loadChannel(cid)
-                    root.notify("channel: " + (root.watching
-                        ? related.channelName : grid.currentItem.channel))
+                    feed.loadChannel(cid, cname)
                     root.watching = false
                 } else {
                     root.notify("channel unknown")
@@ -102,6 +102,10 @@ Window {
     Connections {
         target: tabs
         function onVideoStarted() { root.watching = true; root.refocus() }
+    }
+    Connections {
+        target: feed
+        function onMessage(msg) { root.notify(msg) }
     }
 
     Column {
@@ -237,6 +241,17 @@ Window {
                         break
                     case Qt.Key_Slash:
                         root.promptKind = "search"; root.prompting = true; break
+                    case Qt.Key_S:  // shift+s: subscribe (cell's channel,
+                                    // else the channel feed being viewed)
+                        if (!(event.modifiers & Qt.ShiftModifier))
+                            return
+                        feed.subscribeChannel(
+                            cur && cur.channelId !== "" ? cur.channelId
+                                                        : feed.contextChannelId)
+                        break
+                    case Qt.Key_Escape:  // back to the playing video
+                        if (tabs.activeIndex >= 0) root.watching = true
+                        break
                     case Qt.Key_Q:
                         Qt.quit(); break
                     default:
@@ -698,7 +713,16 @@ Window {
                     case Qt.Key_J: case Qt.Key_Down:
                         ap.cmd(["add", "volume", -5]); break
                     case Qt.Key_M: ap.cmd(["cycle", "mute"]); break
-                    case Qt.Key_S: ap.cmd(["cycle", "sub"]); break
+                    case Qt.Key_S:
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            if (related.channelId !== "")
+                                feed.subscribeChannel(related.channelId)
+                            else
+                                root.notify("channel unknown")
+                        } else {
+                            ap.cmd(["cycle", "sub"])
+                        }
+                        break
                     case Qt.Key_F:
                         root.visibility = root.visibility === Window.FullScreen
                             ? Window.Windowed : Window.FullScreen
@@ -744,6 +768,26 @@ Window {
                 }
                 Rectangle { width: 1; height: parent.height; color: th.bg2 }
 
+                // Feed context (what the grid is showing) while browsing.
+                Text {
+                    id: contextTag
+                    width: !root.watching && feed.contextLabel !== ""
+                        ? implicitWidth + 16 : 0
+                    height: parent.height
+                    visible: width > 0
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 8
+                    rightPadding: 8
+                    text: feed.contextLabel
+                    color: th.fg
+                    font.pixelSize: th.fontSizeSmall
+                }
+                Rectangle {
+                    width: contextTag.visible ? 1 : 0
+                    height: parent.height
+                    color: th.bg2
+                }
+
                 Text {
                     width: parent.width - x - rightSegments.width
                     height: parent.height
@@ -754,7 +798,7 @@ Window {
                         ? "loading…"
                         : root.watching
                         ? "space pause · h/l seek · j/k vol · r related · gc channel · s subs · m mute · f full · gt/1-9 tab · x close · esc back"
-                        : "hjkl move · enter play · t tab · a queue · p next · w later · gc channel · / search · gt/1-9 tab · gs subs · gw later · gl login · q quit"
+                        : "hjkl move · enter play · t tab · a queue · p next · w later · gc channel · S subscribe · / search · gt/1-9 tab · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim
