@@ -89,11 +89,17 @@ MpvObject::MpvObject(QQuickItem *parent) : QQuickFramebufferObject(parent)
     mpv_set_option_string(mpv, "vo", "libmpv");
     // libmpv disables ytdl by default, unlike the mpv CLI.
     mpv_set_option_string(mpv, "ytdl", "yes");
-    // MONO_HWDEC overrides for diagnosis/calibration (e.g. "vaapi-copy"
-    // trades ~2.3x CPU for isolating zero-copy interop issues).
+    // vaapi directly instead of auto-safe: probing nvdec/vulkan on Intel
+    // spams "Cannot load libcuda" + VK errors on every load, and mpv still
+    // falls back to software if vaapi init fails. MONO_HWDEC overrides for
+    // diagnosis/calibration (e.g. "vaapi-copy" isolates zero-copy issues).
     const QByteArray hwdec = qgetenv("MONO_HWDEC");
     mpv_set_option_string(mpv, "hwdec",
-                          hwdec.isEmpty() ? "auto-safe" : hwdec.constData());
+                          hwdec.isEmpty() ? "vaapi" : hwdec.constData());
+    // Only load the vaapi GL interop: the render context otherwise dlopens
+    // every driver (one "Cannot load libcuda" line per player created).
+    if (hwdec.isEmpty())
+        mpv_set_option_string(mpv, "gpu-hwdec-interop", "vaapi");
     mpv_request_log_messages(mpv, "info");
 
     if (mpv_initialize(mpv) < 0)

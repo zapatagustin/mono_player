@@ -107,16 +107,28 @@ def main() -> int:
     tabs.currentVideoChanged.connect(related.load)
     tabs.currentVideoChanged.connect(comments.setCurrent)
 
-    login_profile = None
-    if WEBENGINE:
+    engine = QQmlApplicationEngine()
+
+    # The login webview profile is created lazily on the first login open:
+    # normal runs never touch WebEngine (no deprecation warning, no
+    # Chromium libs). Connected BEFORE engine.load so this slot runs ahead
+    # of the QML Loader's binding when showLogin flips.
+    login_profile: list = [None]
+
+    def ensure_login_profile():
+        if not auth.showLogin or login_profile[0] is not None:
+            return
         # Off-the-record: the google session cookies never touch disk; only
         # the exchanged master token survives, in the keyring.
-        login_profile = QQuickWebEngineProfile()
-        login_profile.setOffTheRecord(True)
-        login_profile.setHttpUserAgent(LOGIN_UA)
-        login_profile.cookieStore().cookieAdded.connect(auth.onCookieAdded)
+        profile = QQuickWebEngineProfile()
+        profile.setOffTheRecord(True)
+        profile.setHttpUserAgent(LOGIN_UA)
+        profile.cookieStore().cookieAdded.connect(auth.onCookieAdded)
+        login_profile[0] = profile
+        engine.rootContext().setContextProperty("loginProfile", profile)
 
-    engine = QQmlApplicationEngine()
+    if WEBENGINE:
+        auth.showLoginChanged.connect(ensure_login_profile)
     engine.addImportPath(str(ROOT / "bridge" / "build"))
     engine.rootContext().setContextProperty("feed", feed)
     engine.rootContext().setContextProperty("tabs", tabs)
@@ -125,7 +137,7 @@ def main() -> int:
     engine.rootContext().setContextProperty("related", related)
     engine.rootContext().setContextProperty("comments", comments)
     engine.rootContext().setContextProperty("authAvailable", WEBENGINE)
-    engine.rootContext().setContextProperty("loginProfile", login_profile)
+    engine.rootContext().setContextProperty("loginProfile", None)
     engine.load(str(ROOT / "qml" / "Main.qml"))
     if not engine.rootObjects():
         return 1
