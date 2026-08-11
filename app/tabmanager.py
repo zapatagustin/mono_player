@@ -136,11 +136,12 @@ class TabManager(QAbstractListModel):
 
     @Slot(int)
     def activate(self, row: int):
-        if not 0 <= row < len(self._tabs) or row == self._active:
+        if not 0 <= row < len(self._tabs):
             return
-        self.persistActive()
-        self._touch_active()
-        self._set_active(row)
+        if row != self._active:
+            self.persistActive()
+            self._touch_active()
+            self._set_active(row)
         tab = self._tabs[row]
         if tab.id in self._live:
             # The browser feel: the player is alive and paused — just show it.
@@ -149,6 +150,8 @@ class TabManager(QAbstractListModel):
             self.videoStarted.emit()
             self._emit_current_video()
         else:
+            # Restored active tab (startup, or a click on its strip cell)
+            # has no player yet — materialize with the resume position.
             self._materialize_active()
 
     def _emit_current_video(self):

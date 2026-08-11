@@ -287,6 +287,33 @@ def test_enqueue_playnext():
     print("enqueue/play-next: ok")
 
 
+def test_restore_and_activate_active_row():
+    # After a restart the active tab exists but has NO live player.
+    # Activating it (startup resume, or clicking its strip cell) must
+    # materialize it with the persisted resume position.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        tid = store.create([QueueItem("aaaaaaaaaaa", "A")])
+        store.save_state(tid, 0, 42.5)
+        store.set_active(tid)
+
+        m = make_manager(store)
+        ev = collect(m)
+        assert m.activeIndex == 0
+        m.activate(0)  # same row as the restored active index
+        assert ("create", tid) in ev
+        assert ("cmd", tid,
+                ["loadfile", url("aaaaaaaaaaa"), "replace", -1,
+                 {"start": "42.5"}]) in ev
+
+        # Activating the active row while its player is live stays cheap:
+        # a re-show, no reload commands.
+        ev.clear()
+        m.activate(0)
+        assert ev == [("show", tid)]
+    print("restore/activate active row: ok")
+
+
 def test_resolved_url_cache():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
@@ -323,6 +350,7 @@ if __name__ == "__main__":
     test_pool_switching()
     test_pool_evict()
     test_pool_close()
+    test_restore_and_activate_active_row()
     test_per_tab_state()
     test_enqueue_playnext()
     test_resolved_url_cache()

@@ -828,6 +828,19 @@ Window {
                             event.accepted = true; return
                         }
                     }
+                    // Keys that must work even with no live player (a black
+                    // watch view must never trap the user).
+                    switch (event.key) {
+                    case Qt.Key_Escape:
+                        root.watching = false
+                        event.accepted = true
+                        return
+                    case Qt.Key_F:
+                        root.visibility = root.visibility === Window.FullScreen
+                            ? Window.Windowed : Window.FullScreen
+                        event.accepted = true
+                        return
+                    }
                     const ap = playerView.activePlayer
                     if (!ap) return
                     switch (event.key) {
@@ -855,11 +868,6 @@ Window {
                             ap.cmd(["cycle", "sub"])
                         }
                         break
-                    case Qt.Key_F:
-                        root.visibility = root.visibility === Window.FullScreen
-                            ? Window.Windowed : Window.FullScreen
-                        break
-                    case Qt.Key_Escape: root.watching = false; break
                     default:
                         return
                     }

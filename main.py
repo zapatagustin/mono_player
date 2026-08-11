@@ -139,12 +139,14 @@ def main() -> int:
     if pot is not None:
         app.aboutToQuit.connect(pot.terminate)
 
-    # Dev harness: `main.py "query"` searches; `--play <id>` opens a tab;
-    # `--resume` re-materializes the restored active tab.
+    # Session restore: reopen where the app was closed — the active tab
+    # resumes at its persisted position (browser-style).
+    if len(sys.argv) <= 1 and tabs.activeIndex >= 0:
+        QTimer.singleShot(0, lambda: tabs.activate(tabs.activeIndex))
+
+    # Dev harness: `main.py "query"` searches; `--play <id>` opens a tab.
     if len(sys.argv) > 2 and sys.argv[1] == "--play":
         QTimer.singleShot(0, lambda: tabs.playVideo(sys.argv[2], sys.argv[2]))
-    elif len(sys.argv) > 1 and sys.argv[1] == "--resume":
-        QTimer.singleShot(0, lambda: tabs.activate(tabs.activeIndex))
     elif len(sys.argv) > 1 and sys.argv[1] == "--login":
         QTimer.singleShot(0, lambda: auth.startLogin("dev@example.com"))
     elif len(sys.argv) > 1 and sys.argv[1] == "--stress":
