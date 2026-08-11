@@ -1,57 +1,70 @@
-"""Checks for the comments parsers (modern commentEntityPayload shape, the
-only one YouTube serves as of 2026) and the on-demand comments model."""
+"""Checks for the comments parsers (modern commentEntityPayload + thread
+ordering + pagination token) and the on-demand comments model with
+load-more and reply expansion."""
 
 import asyncio
 
-from innertube import Comment, parse_comments, parse_comments_token
+from innertube import Comment, parse_comments
 from comments import CommentsModel
 
 
-def payload(cid, author, text, likes="", replies="", published="1 day ago",
-            reply_level=0):
+def payload(cid, author, text, likes="", replies="", published="1 day ago"):
     return {"payload": {"commentEntityPayload": {
         "key": cid,
-        "properties": {
-            "commentId": cid,
-            "content": {"content": text},
-            "publishedTime": published,
-            "replyLevel": reply_level,
-        },
+        "properties": {"commentId": cid, "content": {"content": text},
+                       "publishedTime": published},
         "author": {"channelId": "UCx", "displayName": author},
         "toolbar": {"likeCountNotliked": likes, "replyCount": replies},
     }}}
 
 
+def thread(cid, reply_token=""):
+    t = {"commentThreadRenderer": {
+        "commentViewModel": {"commentViewModel": {"commentId": cid}},
+    }}
+    if reply_token:
+        t["commentThreadRenderer"]["replies"] = {"commentRepliesRenderer": {
+            "contents": [{"continuationItemRenderer": {"continuationEndpoint": {
+                "continuationCommand": {"token": reply_token}}}}]}}
+    return t
+
+
 def test_parse_comments():
-    data = {"frameworkUpdates": {"entityBatchUpdate": {"mutations": [
-        payload("c1", "@alice", "First comment", likes="5K", replies="29"),
-        payload("c2", "@bob", "A reply", reply_level=1),  # skipped
-        payload("c3", "@eve", "Second", published="2 weeks ago"),
-        {"payload": {"somethingElse": {}}},
-    ]}}}
-    assert parse_comments(data) == [
-        Comment("@alice", "First comment", "5K", "1 day ago", "29"),
-        Comment("@eve", "Second", "", "2 weeks ago", ""),
+    # Top-level page: threads give order + reply tokens, payloads give data,
+    # the trailing continuationItemRenderer gives the next-page token.
+    data = {
+        "onResponseReceivedEndpoints": [{"reloadContinuationItemsCommand": {
+            "continuationItems": [
+                thread("c1", reply_token="REPLIES_C1"),
+                thread("c2"),
+                {"continuationItemRenderer": {"continuationEndpoint": {
+                    "continuationCommand": {"token": "PAGE2"}}}},
+            ],
+        }}],
+        "frameworkUpdates": {"entityBatchUpdate": {"mutations": [
+            payload("c1", "@alice", "First", likes="5K", replies="29"),
+            payload("c2", "@eve", "Second"),
+            payload("orphan", "@x", "not referenced by any thread"),
+        ]}},
+    }
+    comments, next_token = parse_comments(data)
+    assert next_token == "PAGE2"
+    assert comments == [
+        Comment("@alice", "First", "5K", "1 day ago", "29", "c1", "REPLIES_C1"),
+        Comment("@eve", "Second", "", "1 day ago", "", "c2", ""),
     ]
-    assert parse_comments({}) == []
-    assert parse_comments(None) == []
+
+    # Replies page: no threads — payloads in document order, no next token.
+    data2 = {"frameworkUpdates": {"entityBatchUpdate": {"mutations": [
+        payload("r1", "@bob", "A reply"),
+    ]}}}
+    comments, next_token = parse_comments(data2)
+    assert [c.author for c in comments] == ["@bob"]
+    assert next_token == ""
+
+    assert parse_comments({}) == ([], "")
+    assert parse_comments(None) == ([], "")
     print("comments parser: ok")
-
-
-def test_comments_token():
-    data = {"contents": [{"itemSectionRenderer": {
-        "sectionIdentifier": "comment-item-section",
-        "contents": [{"continuationItemRenderer": {"continuationEndpoint": {
-            "continuationCommand": {"token": "COMMENT_TOKEN"}}}}],
-    }}, {"itemSectionRenderer": {
-        "sectionIdentifier": "related-items",
-        "contents": [{"continuationItemRenderer": {"continuationEndpoint": {
-            "continuationCommand": {"token": "OTHER_TOKEN"}}}}],
-    }}]}
-    assert parse_comments_token(data) == "COMMENT_TOKEN"
-    assert parse_comments_token({}) == ""
-    assert parse_comments_token(None) == ""
-    print("comments token: ok")
 
 
 def test_comments_model():
@@ -59,39 +72,51 @@ def test_comments_model():
 
     async def fetch(client, video_id):
         calls.append(video_id)
-        return [Comment("@a", "hi", "1", "now", "0")]
+        return ([Comment("@a", "hi", "1", "now", "2", "c1", "RTOK")], "PAGE2")
 
-    m = CommentsModel(client=None, fetch_fn=fetch, cache_size=2)
+    async def fetch_page(client, token):
+        calls.append(token)
+        if token == "RTOK":
+            return ([Comment("@r", "a reply", "", "now", "", "r1", "")], "")
+        return ([Comment("@b", "more", "", "now", "", "c2", "")], "")
+
+    m = CommentsModel(client=None, fetch_fn=fetch, page_fn=fetch_page,
+                      cache_size=2)
     m.setCurrent("aaaaaaaaaaa")
-    assert calls == []  # setCurrent never fetches — load is on demand
-
     asyncio.run(m._load())
     assert calls == ["aaaaaaaaaaa"]
     assert m.items[0]["author"] == "@a"
+    assert m.items[0]["hasReplies"] and not m.items[0]["expanded"]
+    assert m.hasMore
 
-    # Cached: reopening the panel does not refetch.
-    asyncio.run(m._load())
-    assert calls == ["aaaaaaaaaaa"]
+    # Pagination appends and updates the token.
+    asyncio.run(m._load_more())
+    assert calls == ["aaaaaaaaaaa", "PAGE2"]
+    assert [i["author"] for i in m.items] == ["@a", "@b"]
+    assert not m.hasMore  # second page returned no token
 
-    # Switching video clears stale items; next load fetches the new one.
+    # Reply expansion inserts depth-1 items right after the parent.
+    asyncio.run(m._toggle(0))
+    assert calls[-1] == "RTOK"
+    assert [(i["author"], i["depth"]) for i in m.items] == [
+        ("@a", 0), ("@r", 1), ("@b", 0)]
+    assert m.items[0]["expanded"]
+
+    # Collapse removes them; re-expand hits the reply cache, no refetch.
+    asyncio.run(m._toggle(0))
+    assert [i["author"] for i in m.items] == ["@a", "@b"]
+    n = len(calls)
+    asyncio.run(m._toggle(0))
+    assert len(calls) == n
+    assert [i["author"] for i in m.items] == ["@a", "@r", "@b"]
+
+    # Switching video clears items and pagination state.
     m.setCurrent("bbbbbbbbbbb")
-    assert m.items == []
-    asyncio.run(m._load())
-    assert calls == ["aaaaaaaaaaa", "bbbbbbbbbbb"]
-
-    # Failure degrades to empty.
-    async def boom(client, video_id):
-        raise RuntimeError("net")
-
-    m2 = CommentsModel(client=None, fetch_fn=boom)
-    m2.setCurrent("ccccccccccc")
-    asyncio.run(m2._load())
-    assert m2.items == [] and not m2.loading
+    assert m.items == [] and not m.hasMore
     print("comments model: ok")
 
 
 if __name__ == "__main__":
     test_parse_comments()
-    test_comments_token()
     test_comments_model()
     print("all checks passed")

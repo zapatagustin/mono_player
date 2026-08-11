@@ -608,7 +608,8 @@ Window {
                                 verticalAlignment: Text.AlignVCenter
                                 text: playerView.panelMode === "comments"
                                     ? (comments.loading ? "comments — loading…"
-                                       : "comments (" + comments.items.length + ")")
+                                       : "comments (" + comments.items.length
+                                         + (comments.hasMore ? "+" : "") + ")")
                                     : related.loading ? "related — loading…"
                                     : "related" + (related.channelName !== ""
                                         ? " — " + related.channelName : "")
@@ -651,6 +652,7 @@ Window {
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.leftMargin: 10
+                                        + commCell.modelData.depth * 18
                                     anchors.rightMargin: 6
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 3
@@ -678,10 +680,13 @@ Window {
                                     Text {
                                         text: (commCell.modelData.likes !== ""
                                                ? commCell.modelData.likes + " likes" : "")
-                                              + (commCell.modelData.replies !== ""
-                                                 ? "  ·  " + commCell.modelData.replies
-                                                   + " replies" : "")
-                                        color: th.emptyDim
+                                              + (commCell.modelData.hasReplies
+                                                 ? "  ·  "
+                                                   + (commCell.modelData.expanded ? "▾" : "▸")
+                                                   + " " + commCell.modelData.replies
+                                                   + " replies (enter)" : "")
+                                        color: commCell.modelData.hasReplies
+                                            ? th.fgDim : th.emptyDim
                                         font.pixelSize: th.fontSizeSmall
                                         visible: text !== ""
                                     }
@@ -785,13 +790,20 @@ Window {
                         case Qt.Key_J: case Qt.Key_Down:
                             list.currentIndex = Math.min(
                                 items.length - 1, list.currentIndex + 1)
+                            if (!isRel && comments.hasMore
+                                    && list.currentIndex === items.length - 1)
+                                comments.loadMore()
                             event.accepted = true; return
                         case Qt.Key_K: case Qt.Key_Up:
                             list.currentIndex = Math.max(
                                 0, list.currentIndex - 1)
                             event.accepted = true; return
                         case Qt.Key_Return: case Qt.Key_Enter:
-                            if (it) tabs.playVideo(it.videoId, it.title)
+                            if (isRel) {
+                                if (it) tabs.playVideo(it.videoId, it.title)
+                            } else {
+                                comments.toggleReplies(commList.currentIndex)
+                            }
                             event.accepted = true; return
                         case Qt.Key_T:
                             if (it) { tabs.openInNewTab(it.videoId, it.title)

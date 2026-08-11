@@ -395,45 +395,92 @@ class Comment:
     likes: str
     published: str
     replies: str
+    comment_id: str = ""
+    reply_token: str = ""  # continuation for this comment's replies
 
 
-def parse_comments(data) -> list[Comment]:
-    """Modern shape only: commentEntityPayload mutations (framework updates).
-    Replies (replyLevel > 0) are skipped; malformed payloads too."""
-    comments = []
+def _parse_comment_payload(payload) -> Comment | None:
+    props = payload.get("properties")
+    if not isinstance(props, dict):
+        return None
+    cid = props.get("commentId")
+    text = _walk(props, "content", "content")
+    author = _walk(payload, "author", "displayName")
+    if not isinstance(text, str) or not isinstance(author, str):
+        return None
+    likes = _walk(payload, "toolbar", "likeCountNotliked")
+    replies = _walk(payload, "toolbar", "replyCount")
+    published = props.get("publishedTime")
+    return Comment(
+        author,
+        text,
+        likes if isinstance(likes, str) else "",
+        published if isinstance(published, str) else "",
+        replies if isinstance(replies, str) else "",
+        cid if isinstance(cid, str) else "",
+    )
+
+
+def _first_token(node) -> str:
+    for _, cont in _find_renderers(node, frozenset({"continuationCommand"})):
+        token = cont.get("token")
+        if isinstance(token, str) and token:
+            return token
+    return ""
+
+
+def parse_comments(data) -> tuple[list[Comment], str]:
+    """(comments, next_page_token). Threads carry ordering and per-comment
+    reply tokens; a replies page has no threads, so payloads fall back to
+    document order. Data lives in commentEntityPayload mutations — the only
+    shape YouTube serves now."""
+    by_id: dict[str, Comment] = {}
+    in_order: list[Comment] = []
     for _, payload in _find_renderers(data, frozenset({"commentEntityPayload"})):
-        props = payload.get("properties")
-        if not isinstance(props, dict):
+        comment = _parse_comment_payload(payload)
+        if comment is not None:
+            in_order.append(comment)
+            if comment.comment_id:
+                by_id[comment.comment_id] = comment
+
+    comments = []
+    for _, thread in _find_renderers(data, frozenset({"commentThreadRenderer"})):
+        cid = _walk(thread, "commentViewModel", "commentViewModel", "commentId")
+        base = by_id.get(cid) if isinstance(cid, str) else None
+        if base is None:
             continue
-        level = props.get("replyLevel")
-        if isinstance(level, int) and level > 0:
+        token = _first_token(thread.get("replies"))
+        comments.append(
+            Comment(base.author, base.text, base.likes, base.published,
+                    base.replies, base.comment_id, token))
+    if not comments:
+        comments = in_order
+
+    next_token = ""
+    endpoints = data.get("onResponseReceivedEndpoints") \
+        if isinstance(data, dict) else None
+    for endpoint in endpoints if isinstance(endpoints, list) else []:
+        if not isinstance(endpoint, dict):
             continue
-        text = _walk(props, "content", "content")
-        author = _walk(payload, "author", "displayName")
-        if not isinstance(text, str) or not isinstance(author, str):
-            continue
-        likes = _walk(payload, "toolbar", "likeCountNotliked")
-        replies = _walk(payload, "toolbar", "replyCount")
-        published = props.get("publishedTime")
-        comments.append(Comment(
-            author,
-            text,
-            likes if isinstance(likes, str) else "",
-            published if isinstance(published, str) else "",
-            replies if isinstance(replies, str) else "",
-        ))
-    return comments
+        action = endpoint.get("reloadContinuationItemsCommand") \
+            or endpoint.get("appendContinuationItemsAction") or {}
+        items = action.get("continuationItems") \
+            if isinstance(action, dict) else None
+        for item in items if isinstance(items, list) else []:
+            cont = item.get("continuationItemRenderer") \
+                if isinstance(item, dict) else None
+            if isinstance(cont, dict):
+                next_token = _first_token(cont) or next_token
+    return comments, next_token
 
 
 def parse_comments_token(data) -> str:
     """Continuation token of the comment-item-section in a `next` response."""
     if isinstance(data, dict):
         if data.get("sectionIdentifier") == "comment-item-section":
-            for _, cont in _find_renderers(
-                    data, frozenset({"continuationCommand"})):
-                token = cont.get("token")
-                if isinstance(token, str) and token:
-                    return token
+            token = _first_token(data)
+            if token:
+                return token
         for value in data.values():
             token = parse_comments_token(value)
             if token:
@@ -446,26 +493,31 @@ def parse_comments_token(data) -> str:
     return ""
 
 
-async def comments(client, video_id: str) -> list[Comment]:
+async def comments_page(client, token: str) -> tuple[list[Comment], str]:
+    """One `next {continuation}` call: a further comments page, or a
+    comment's replies (same endpoint, thread-less response)."""
+    resp = await client.post(
+        NEXT_URL,
+        json={"context": WEB_CONTEXT, "continuation": token},
+        headers={"content-type": "application/json"},
+    )
+    resp.raise_for_status()
+    return parse_comments(resp.json())
+
+
+async def comments(client, video_id: str) -> tuple[list[Comment], str]:
     """Top-level comments, first page: `next` for the section token, then
-    `next {continuation}` for the payloads."""
-    headers = {"content-type": "application/json"}
+    the continuation for the payloads."""
     resp = await client.post(
         NEXT_URL,
         json={"context": WEB_CONTEXT, "videoId": video_id},
-        headers=headers,
+        headers={"content-type": "application/json"},
     )
     resp.raise_for_status()
     token = parse_comments_token(resp.json())
     if not token:
-        return []
-    resp = await client.post(
-        NEXT_URL,
-        json={"context": WEB_CONTEXT, "continuation": token},
-        headers=headers,
-    )
-    resp.raise_for_status()
-    return parse_comments(resp.json())
+        return [], ""
+    return await comments_page(client, token)
 
 
 SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"
