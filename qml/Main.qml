@@ -241,6 +241,20 @@ Window {
                 anchors.fill: parent
                 visible: root.watching
 
+                property real position: 0
+                property real duration: 0
+                property bool paused: false
+
+                function fmt(s) {
+                    s = Math.max(0, Math.floor(s))
+                    const h = Math.floor(s / 3600)
+                    const m = Math.floor(s % 3600 / 60)
+                    const sec = String(s % 60).padStart(2, "0")
+                    return h > 0
+                        ? `${h}:${String(m).padStart(2, "0")}:${sec}`
+                        : `${m}:${sec}`
+                }
+
                 MpvObject {
                     id: player
                     anchors.fill: parent
@@ -253,8 +267,13 @@ Window {
                             "bv*[vcodec^=av01][height<=?4320]+ba/bv*[vcodec^=vp9]+ba/b")
                     }
 
-                    onPlaybackTimeChanged: (secs) => tabs.playbackTime(secs)
+                    onPlaybackTimeChanged: (secs) => {
+                        tabs.playbackTime(secs)
+                        playerView.position = secs
+                    }
                     onPlaylistPosChanged: (pos) => tabs.playlistPos(pos)
+                    onDurationChanged: (secs) => playerView.duration = secs
+                    onPauseChanged: (p) => playerView.paused = p
                     onLogMessage: (prefix, level, text) => {
                         // vd info is low-volume and carries the hw/sw
                         // decode decision — always worth surfacing.
@@ -263,6 +282,84 @@ Window {
                     }
                 }
 
+                // Controls overlay: shown on mouse movement, fades out after
+                // a moment of stillness.
+                HoverHandler {
+                    onPointChanged: controls.poke()
+                }
+
+                Rectangle {
+                    id: controls
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    height: 48
+                    color: "#cc111111"
+                    visible: opacity > 0
+                    opacity: 0
+
+                    function poke() {
+                        opacity = 1
+                        hideTimer.restart()
+                    }
+                    Behavior on opacity { NumberAnimation { duration: 200 } }
+                    Timer {
+                        id: hideTimer
+                        interval: 2500
+                        onTriggered: if (!seekBar.pressed) controls.opacity = 0
+                    }
+
+                    Row {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 12
+
+                        Text {
+                            width: 24
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: playerView.paused ? "▶" : "⏸"
+                            color: "white"
+                            font.pixelSize: 18
+                            TapHandler {
+                                onTapped: player.command(["cycle", "pause"])
+                            }
+                        }
+                        Slider {
+                            id: seekBar
+                            width: parent.width - 24 - 110 - 2 * parent.spacing
+                            anchors.verticalCenter: parent.verticalCenter
+                            from: 0
+                            to: Math.max(playerView.duration, 0.1)
+                            value: pressed ? value : playerView.position
+                            onMoved: player.command(["seek", value, "absolute"])
+                        }
+                        Text {
+                            width: 110
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: playerView.fmt(playerView.position) + " / "
+                                  + playerView.fmt(playerView.duration)
+                            color: "#cccccc"
+                            font.pixelSize: 12
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+                }
+
+                Keys.onSpacePressed: player.command(["cycle", "pause"])
+                Keys.onLeftPressed: player.command(["seek", -5])
+                Keys.onRightPressed: player.command(["seek", 5])
+                Keys.onUpPressed: player.command(["add", "volume", 5])
+                Keys.onDownPressed: player.command(["add", "volume", -5])
+                Keys.onPressed: (event) => {
+                    if (event.key === Qt.Key_M) {
+                        player.command(["cycle", "mute"])
+                        event.accepted = true
+                    } else if (event.key === Qt.Key_F) {
+                        root.visibility = root.visibility === Window.FullScreen
+                            ? Window.Windowed : Window.FullScreen
+                        event.accepted = true
+                    }
+                }
                 // Back to browse; the tab keeps playing, browser-style.
                 Keys.onEscapePressed: root.watching = false
             }

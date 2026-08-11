@@ -26,6 +26,8 @@ public:
 signals:
     void playlistPosChanged(qint64 pos);
     void playbackTimeChanged(double secs);
+    void durationChanged(double secs);
+    void pauseChanged(bool paused);
     void logMessage(QString prefix, QString level, QString text);
 
 private slots:

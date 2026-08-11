@@ -4,8 +4,10 @@
 #include "mpvobject.h"
 #include "node_conv.h"
 
+#include <QGuiApplication>
 #include <QJSValue>
 #include <QOpenGLContext>
+#include <QtGui/qguiapplication_platform.h>
 #include <QOpenGLFramebufferObject>
 #include <QtQuick/QQuickOpenGLUtils>
 #include <QtQuick/QQuickWindow>
@@ -31,10 +33,19 @@ public:
     {
         if (!obj_->mpv_gl) {
             mpv_opengl_init_params gl_init_params{getProcAddressMpv, nullptr};
+            // Hand mpv the compositor connection: without it the vaapi
+            // interop cannot create a VA display and hwdec degrades to
+            // vaapi-copy (a per-frame GPU->RAM->GL round trip).
+            void *wl_display = nullptr;
+            if (auto *wayland =
+                    qGuiApp->nativeInterface<QNativeInterface::QWaylandApplication>())
+                wl_display = wayland->display();
             mpv_render_param params[]{
                 {MPV_RENDER_PARAM_API_TYPE,
                  const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
                 {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params},
+                {wl_display ? MPV_RENDER_PARAM_WL_DISPLAY
+                            : MPV_RENDER_PARAM_INVALID, wl_display},
                 {MPV_RENDER_PARAM_INVALID, nullptr}};
             if (mpv_render_context_create(&obj_->mpv_gl, obj_->mpv, params) < 0)
                 qFatal("mpv: failed to initialize render context");
@@ -73,6 +84,9 @@ MpvObject::MpvObject(QQuickItem *parent) : QQuickFramebufferObject(parent)
     if (!mpv)
         qFatal("mpv: mpv_create failed");
 
+    // Render through our render context instead of a core-owned window --
+    // without this mpv opens its own Wayland window (render.h requires it).
+    mpv_set_option_string(mpv, "vo", "libmpv");
     // libmpv disables ytdl by default, unlike the mpv CLI.
     mpv_set_option_string(mpv, "ytdl", "yes");
     mpv_set_option_string(mpv, "hwdec", "auto-safe");
@@ -83,6 +97,8 @@ MpvObject::MpvObject(QQuickItem *parent) : QQuickFramebufferObject(parent)
 
     mpv_observe_property(mpv, 0, "playlist-pos", MPV_FORMAT_INT64);
     mpv_observe_property(mpv, 0, "playback-time", MPV_FORMAT_DOUBLE);
+    mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
+    mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG);
     mpv_set_wakeup_callback(mpv, MpvObject::wakeup, this);
 
     // GL FBOs are bottom-up; the scene graph samples top-down.
@@ -183,6 +199,12 @@ void MpvObject::handleEvent(mpv_event *event)
         else if (std::strcmp(prop->name, "playback-time") == 0 &&
                  prop->format == MPV_FORMAT_DOUBLE)
             emit playbackTimeChanged(*static_cast<double *>(prop->data));
+        else if (std::strcmp(prop->name, "duration") == 0 &&
+                 prop->format == MPV_FORMAT_DOUBLE)
+            emit durationChanged(*static_cast<double *>(prop->data));
+        else if (std::strcmp(prop->name, "pause") == 0 &&
+                 prop->format == MPV_FORMAT_FLAG)
+            emit pauseChanged(*static_cast<int *>(prop->data) != 0);
         break;
     }
     case MPV_EVENT_LOG_MESSAGE: {

@@ -131,6 +131,13 @@ Three distinct structures — do not merge them:
   and QML never touch libmpv directly; python-mpv is out. The bulk of the
   file is mechanical =QVariant= <-> =mpv_node= conversion.
   Everything else is Python/PySide6.
+  Two hard-won render-API requirements live in the bridge: =vo=libmpv=
+  must be set explicitly or the core opens its OWN Wayland window and
+  the FBO stays black, and =MPV_RENDER_PARAM_WL_DISPLAY= (Qt's
+  wl_display) must be passed at render-context creation or the vaapi
+  interop cannot create a VA display and hwdec silently degrades to
+  =vaapi-copy= (~2.3x the CPU). The =[vd]= log line in the QML filter
+  is the permanent hw/sw decode tell.
   Python performance is irrelevant — there is no hot loop in our code; if
   a model ever janks, lowering that one model to C++ is a localized
   refactor, done after measuring, not before.
@@ -311,9 +318,12 @@ the flake.
    Chromium's shared pages aren't over-counted):
    |                    | mono_player  | Chromium 151 (stock, fullscreen) |
    |--------------------+--------------+----------------------------------|
-   | CPU avg (one core) | 8% (p95 9%)  | 18% (p95 42%)                    |
-   | PSS avg / peak     | 476 / 498 MB | 819 / 924 MB                     |
-   ~2.2x less CPU (4.7x at p95 — no JS/GC spikes), ~1.7x less memory.
+   | CPU avg (one core) | 12% (p95 13%) | 18% (p95 42%)                   |
+   | PSS avg / peak     | 585 / 608 MB | 819 / 924 MB                     |
+   ~1.5x less CPU (3.2x at p95 — no JS/GC spikes), ~1.4x less memory.
+   (An earlier 8% figure measured mpv's own gpu-next window by mistake —
+   see the vo=libmpv note under Rendering; with the video actually
+   embedded, vaapi-copy cost 28% until zero-copy was restored.)
    Time to first frame: 2.8s from loadfile (includes ytdl_hook
    extraction; the =tabs: first frame= log line is the permanent probe).
    Frame time: QSG timing logging proved sporadic, but every sampled
