@@ -5,7 +5,13 @@ import os
 import tempfile
 from pathlib import Path
 
-from innertube import Video, parse_next, parse_playlist, parse_search
+from innertube import (
+    Video,
+    parse_next,
+    parse_playlist,
+    parse_playlists_list,
+    parse_search,
+)
 from thumbs import ThumbCache
 from feedstore import FeedStore
 
@@ -173,6 +179,24 @@ def test_next_parser():
     _, _, related = parse_next({"a": [item]})
     assert related[0].meta == "17K views · 1 year ago"
 
+    # ANDROID home serves gridVideoRenderer: same fields as search's
+    # videoRenderer plus view/published texts.
+    grid_item = {"gridVideoRenderer": {
+        "videoId": "dQw4w9WgXcQ",
+        "title": {"runs": [{"text": "Home Pick"}]},
+        "shortBylineText": {"runs": [{"text": "HomeChan", "navigationEndpoint": {
+            "browseEndpoint": {"browseId": "UChome"}}}]},
+        "lengthText": {"runs": [{"text": "10:00"}]},
+        "shortViewCountText": {"runs": [{"text": "1M views"}]},
+        "publishedTimeText": {"runs": [{"text": "2 days ago"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://t/g.jpg"}]},
+    }}
+    _, _, videos = parse_next({"contents": [grid_item]})
+    assert videos == [
+        Video("dQw4w9WgXcQ", "Home Pick", "HomeChan", "10:00", "https://t/g.jpg",
+              "UChome", "1M views · 2 days ago"),
+    ]
+
     # Owner id can live on the title runs instead of a top-level endpoint.
     data4 = {"x": {"videoOwnerRenderer": {
         "title": {"runs": [{"text": "RunsOwner", "navigationEndpoint": {
@@ -185,6 +209,27 @@ def test_next_parser():
     assert parse_next({}) == ("", "", [])
     assert parse_next(None) == ("", "", [])
     print("next parser: ok")
+
+
+def test_playlists_list_parser():
+    def grid_pl(pid, title, count):
+        return {"gridPlaylistRenderer": {
+            "playlistId": pid,
+            "title": {"runs": [{"text": title}]},
+            "videoCountText": {"runs": [{"text": count}]},
+            "thumbnail": {"thumbnails": [{"url": "https://t/pl.jpg"}]},
+        }}
+
+    data = {"deep": [{"nesting": grid_pl("PLabc123", "My Mix", "42 videos")},
+                     {"gridPlaylistRenderer": "nope"}]}
+    pls = parse_playlists_list(data)
+    assert pls == [
+        Video("", "My Mix", "", "", "https://t/pl.jpg", "", "42 videos",
+              "PLabc123"),
+    ]
+    assert parse_playlists_list({}) == []
+    assert parse_playlists_list(None) == []
+    print("playlists list parser: ok")
 
 
 def test_playlist_parser():
@@ -280,6 +325,7 @@ def test_feed_store():
 if __name__ == "__main__":
     test_parser()
     test_next_parser()
+    test_playlists_list_parser()
     test_playlist_parser()
     test_thumb_cache()
     test_feed_store()

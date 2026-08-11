@@ -259,9 +259,15 @@ End-to-end confirmed: real 4K60 AV1 from YouTube plays with
   Distribution via a store should assume takedown risk.
 - InnerTube =browse= responses are undocumented and shape-shift; parsing
   must be defensive and versioned.
-- Logged-out home feed content is undecided: anonymous trending, or
-  NewPipe-style local subscriptions (anonymous per-channel fetch). Search
-  and related videos already work anonymously; only "home" needs a story.
+- Home DECIDED (2026-08-11): logged in, home is the account's
+  personalized feed (=FEwhat_to_watch=, ANDROID + Bearer — serves
+  =gridVideoRenderer=; loaded on launch behind the session restore), with
+  =gh/gs/gy/gp/gw= jumping to home/subscriptions/history/playlists/watch
+  later. Logged out, home stays the last cached feed + search — the
+  anonymous-home story (trending died mid-2025) remains unbuilt until
+  someone logged-out asks for it. Shorts have no parseable dedicated
+  feed (elementRenderer protobufs); the ones in home appear as normal
+  videos.
 
 * Status / next steps
 

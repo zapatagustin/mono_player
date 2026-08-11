@@ -140,9 +140,14 @@ def main() -> int:
         app.aboutToQuit.connect(pot.terminate)
 
     # Session restore: reopen where the app was closed — the active tab
-    # resumes at its persisted position (browser-style).
-    if len(sys.argv) <= 1 and tabs.activeIndex >= 0:
-        QTimer.singleShot(0, lambda: tabs.activate(tabs.activeIndex))
+    # resumes at its persisted position (browser-style). Behind it, the
+    # browse view refreshes to the personalized home (cached feed paints
+    # first, home replaces it when it arrives).
+    if len(sys.argv) <= 1:
+        if auth.loggedIn:
+            QTimer.singleShot(0, feed.loadHome)
+        if tabs.activeIndex >= 0:
+            QTimer.singleShot(0, lambda: tabs.activate(tabs.activeIndex))
 
     # Dev harness: `main.py "query"` searches; `--play <id>` opens a tab.
     if len(sys.argv) > 2 and sys.argv[1] == "--play":

@@ -28,6 +28,7 @@ class Video:
     thumb_url: str
     channel_id: str = ""
     meta: str = ""  # "1.2M views · 3 days ago" — display-ready, localized
+    playlist_id: str = ""  # set (with empty video_id) for playlist entries
 
 
 def _walk(node, *path):
@@ -243,7 +244,8 @@ WEB_CONTEXT = {
 
 _NEXT_RENDERERS = frozenset({
     "compactVideoRenderer", "videoWithContextRenderer", "videoRenderer",
-    "lockupViewModel", "videoOwnerRenderer", "slimOwnerRenderer",
+    "gridVideoRenderer", "lockupViewModel", "videoOwnerRenderer",
+    "slimOwnerRenderer",
 })
 
 _TIME = re.compile(r"[\d:]+")
@@ -324,7 +326,7 @@ def parse_next(data) -> tuple[str, str, list[Video]]:
                 owner_id = bid or ""
                 owner_name = _text(node.get("title")) or ""
             continue
-        if name == "compactVideoRenderer":
+        if name in ("compactVideoRenderer", "gridVideoRenderer"):
             video = _parse_compact_video(node)
         elif name == "lockupViewModel":
             video = _parse_lockup(node)
@@ -518,6 +520,68 @@ async def comments(client, video_id: str) -> tuple[list[Comment], str]:
     if not token:
         return [], ""
     return await comments_page(client, token)
+
+
+_PLAYLIST_LIST_RENDERERS = frozenset({
+    "gridPlaylistRenderer", "compactPlaylistRenderer", "playlistRenderer",
+})
+
+
+def parse_playlists_list(data) -> list[Video]:
+    """The account's playlists as feed entries: empty video_id,
+    playlist_id set, count in meta."""
+    playlists = []
+    for _, pr in _find_renderers(data, _PLAYLIST_LIST_RENDERERS):
+        pid = pr.get("playlistId")
+        title = _text(pr.get("title"))
+        if not isinstance(pid, str) or not pid or title is None:
+            continue
+        thumb = _walk(pr, "thumbnail", "thumbnails", -1, "url")
+        playlists.append(Video(
+            "",
+            title,
+            "",
+            "",
+            thumb if isinstance(thumb, str) else "",
+            "",
+            _text(pr.get("videoCountText")) or "",
+            pid,
+        ))
+    return playlists
+
+
+async def account_feed(client, bearer: str, browse_id: str) -> list[Video]:
+    """Authenticated ANDROID browse parsed by the generic video walker —
+    home (FEwhat_to_watch) serves gridVideoRenderer, history (FEhistory)
+    compactVideoRenderer."""
+    resp = await client.post(
+        BROWSE_URL,
+        json={"context": ANDROID_CONTEXT, "browseId": browse_id},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    _, _, videos = parse_next(resp.json())
+    return videos
+
+
+async def my_playlists(client, bearer: str) -> list[Video]:
+    resp = await client.post(
+        BROWSE_URL,
+        json={"context": ANDROID_CONTEXT, "browseId": "FEplaylist_aggregation"},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return parse_playlists_list(resp.json())
+
+
+async def playlist_videos(client, bearer: str, playlist_id: str) -> list[Video]:
+    resp = await client.post(
+        BROWSE_URL,
+        json={"context": ANDROID_CONTEXT, "browseId": "VL" + playlist_id},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return parse_playlist(resp.json())
 
 
 SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"

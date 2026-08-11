@@ -58,6 +58,18 @@ Window {
                 if (auth.loggedIn) feed.loadWatchLater()
                 else root.notify("login required (gl)")
                 root.watching = false; return true
+            case Qt.Key_H:
+                if (auth.loggedIn) feed.loadHome()
+                else root.notify("login required (gl)")
+                root.watching = false; return true
+            case Qt.Key_Y:
+                if (auth.loggedIn) feed.loadHistory()
+                else root.notify("login required (gl)")
+                root.watching = false; return true
+            case Qt.Key_P:
+                if (auth.loggedIn) feed.loadPlaylists()
+                else root.notify("login required (gl)")
+                root.watching = false; return true
             case Qt.Key_L:
                 if (!authAvailable) { root.notify("webengine missing"); return true }
                 if (auth.loggedIn) { auth.logout(); root.notify("signed out") }
@@ -223,7 +235,7 @@ Window {
                     case Qt.Key_G:  // shift+g (plain g handled by gKey)
                         grid.currentIndex = grid.count - 1; break
                     case Qt.Key_Return: case Qt.Key_Enter:
-                        if (cur) tabs.playVideo(cur.videoId, cur.title); break
+                        if (cur) cur.open(); break
                     case Qt.Key_T:
                         if (cur) { tabs.openInNewTab(cur.videoId, cur.title)
                                    root.notify("opened in new tab") } break
@@ -278,6 +290,15 @@ Window {
                         required property string duration
                         required property string thumb
                         required property string channelId
+                        required property string meta
+                        required property string playlistId
+
+                        function open() {
+                            if (playlistId !== "")
+                                feed.loadPlaylist(playlistId)
+                            else
+                                tabs.playVideo(videoId, title)
+                        }
 
                         width: grid.cellWidth
                         height: grid.cellHeight
@@ -333,8 +354,8 @@ Window {
                                 }
                                 Text {
                                     width: parent.width
-                                    text: cell.channel
-                                          + (cell.duration ? " · " + cell.duration : "")
+                                    text: [cell.channel, cell.duration, cell.meta]
+                                          .filter(s => s !== "").join(" · ")
                                     color: th.fgDim
                                     font.pixelSize: th.fontSizeSmall
                                     elide: Text.ElideRight
@@ -345,7 +366,7 @@ Window {
                             acceptedButtons: Qt.LeftButton
                             onTapped: {
                                 grid.currentIndex = cell.index
-                                tabs.playVideo(cell.videoId, cell.title)
+                                cell.open()
                             }
                         }
                         TapHandler {
@@ -938,7 +959,7 @@ Window {
                         ? "loading…"
                         : root.watching
                         ? "space pause · h/l seek · j/k vol · r related · c comments · gc channel · S subscribe · m mute · f full · gt/1-9 tab · esc back"
-                        : "hjkl move · enter play · t tab · a queue · p next · w later · gc channel · S subscribe · / search · gt/1-9 tab · esc video · q quit"
+                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · t/a/p/w/S act · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim

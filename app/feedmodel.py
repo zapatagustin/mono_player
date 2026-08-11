@@ -19,8 +19,8 @@ from feedstore import FeedStore
 from innertube import Video
 from thumbs import ThumbCache
 
-VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB, CHANNEL_ID = range(
-    Qt.ItemDataRole.UserRole + 1, Qt.ItemDataRole.UserRole + 7
+VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB, CHANNEL_ID, META, PLAYLIST_ID = range(
+    Qt.ItemDataRole.UserRole + 1, Qt.ItemDataRole.UserRole + 9
 )
 
 
@@ -57,6 +57,8 @@ class FeedModel(QAbstractListModel):
             DURATION: b"duration",
             THUMB: b"thumb",
             CHANNEL_ID: b"channelId",
+            META: b"meta",
+            PLAYLIST_ID: b"playlistId",
         }
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -72,9 +74,17 @@ class FeedModel(QAbstractListModel):
         if role == DURATION:
             return v.duration
         if role == THUMB:
-            return self._thumbs.get(v.video_id, "")
+            cached = self._thumbs.get(v.video_id, "")
+            # Playlist entries have no cacheable video id; load remote.
+            if not cached and v.playlist_id:
+                return v.thumb_url
+            return cached
         if role == CHANNEL_ID:
             return v.channel_id
+        if role == META:
+            return v.meta
+        if role == PLAYLIST_ID:
+            return v.playlist_id
         return None
 
     # --- invokables ---
@@ -87,7 +97,8 @@ class FeedModel(QAbstractListModel):
 
     @Slot(str)
     def requestThumb(self, video_id: str):
-        if video_id in self._thumbs or video_id in self._pending:
+        if not video_id or video_id in self._thumbs \
+                or video_id in self._pending:
             return
         cached = self._cache.get(video_id)
         if cached is not None:
@@ -151,6 +162,33 @@ class FeedModel(QAbstractListModel):
         if self._auth is not None:
             asyncio.create_task(self._load_account_feed(
                 innertube.watch_later, "watch later"))
+
+    @Slot()
+    def loadHome(self):
+        if self._auth is not None:
+            asyncio.create_task(self._load_account_feed(
+                lambda c, b: innertube.account_feed(c, b, "FEwhat_to_watch"),
+                "home"))
+
+    @Slot()
+    def loadHistory(self):
+        if self._auth is not None:
+            asyncio.create_task(self._load_account_feed(
+                lambda c, b: innertube.account_feed(c, b, "FEhistory"),
+                "history"))
+
+    @Slot()
+    def loadPlaylists(self):
+        if self._auth is not None:
+            asyncio.create_task(self._load_account_feed(
+                innertube.my_playlists, "playlists"))
+
+    @Slot(str)
+    def loadPlaylist(self, playlist_id: str):
+        if playlist_id and self._auth is not None:
+            asyncio.create_task(self._load_account_feed(
+                lambda c, b: innertube.playlist_videos(c, b, playlist_id),
+                "playlist"))
 
     @Slot(str)
     def addToWatchLater(self, video_id: str):
