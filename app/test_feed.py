@@ -141,7 +141,11 @@ def test_next_parser():
             "metadata": {"lockupMetadataViewModel": {
                 "title": {"content": title},
                 "metadata": {"contentMetadataViewModel": {"metadataRows": [
-                    {"metadataParts": [{"text": {"content": "LockChan"}}]}
+                    {"metadataParts": [{"text": {"content": "LockChan"}}]},
+                    {"metadataParts": [
+                        {"text": {"content": "1.2M views"}},
+                        {"text": {"content": "3 days ago"}},
+                    ]},
                 ]}},
             }},
             "contentImage": {"thumbnailViewModel": {
@@ -158,8 +162,16 @@ def test_next_parser():
     ]}
     _, _, related = parse_next(data3)
     assert related == [
-        Video("dQw4w9WgXcQ", "Lock One", "LockChan", "31:25", "https://t/l.jpg"),
+        Video("dQw4w9WgXcQ", "Lock One", "LockChan", "31:25", "https://t/l.jpg",
+              "", "1.2M views · 3 days ago"),
     ]
+
+    # compactVideoRenderer carries views/date as separate text fields.
+    item = compact("dQw4w9WgXcQ", "C", "UCx")
+    item["compactVideoRenderer"]["shortViewCountText"] = {"simpleText": "17K views"}
+    item["compactVideoRenderer"]["publishedTimeText"] = {"simpleText": "1 year ago"}
+    _, _, related = parse_next({"a": [item]})
+    assert related[0].meta == "17K views · 1 year ago"
 
     # Owner id can live on the title runs instead of a top-level endpoint.
     data4 = {"x": {"videoOwnerRenderer": {

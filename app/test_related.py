@@ -7,16 +7,27 @@ from innertube import Video
 from related import RelatedModel
 
 
+class FakeThumbCache:
+    def __init__(self, hits):
+        self.hits = hits
+
+    def get(self, video_id):
+        return self.hits.get(video_id)
+
+
 def test_related_model():
     calls = []
 
     async def fetch(client, video_id):
         calls.append(video_id)
         return ("UCowner", "Chan", [
-            Video("bbbbbbbbbbb", "Rel", "c", "1:00", "https://t/x.jpg", "UCrel"),
+            Video("bbbbbbbbbbb", "Rel", "c", "1:00", "https://t/x.jpg",
+                  "UCrel", "9K views · 2 days ago"),
         ])
 
-    m = RelatedModel(client=None, fetch_fn=fetch, cache_size=2)
+    thumbs = FakeThumbCache({"bbbbbbbbbbb": "/cache/bbbbbbbbbbb.jpg"})
+    m = RelatedModel(client=None, fetch_fn=fetch, cache_size=2,
+                     thumb_cache=thumbs)
     changes = []
     m.changed.connect(lambda: changes.append(1))
 
@@ -27,6 +38,8 @@ def test_related_model():
     assert m.items == [{
         "videoId": "bbbbbbbbbbb", "title": "Rel", "channel": "c",
         "duration": "1:00", "channelId": "UCrel",
+        "meta": "9K views · 2 days ago",
+        "thumb": "file:///cache/bbbbbbbbbbb.jpg",
     }]
     assert changes  # UI notified
 

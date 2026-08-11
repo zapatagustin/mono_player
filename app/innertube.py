@@ -27,6 +27,7 @@ class Video:
     duration: str
     thumb_url: str
     channel_id: str = ""
+    meta: str = ""  # "1.2M views · 3 days ago" — display-ready, localized
 
 
 def _walk(node, *path):
@@ -257,9 +258,18 @@ def _parse_lockup(vm) -> Video | None:
     if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) \
             or not isinstance(title, str):
         return None
-    channel = _walk(vm, "metadata", "lockupMetadataViewModel", "metadata",
-                    "contentMetadataViewModel", "metadataRows", 0,
-                    "metadataParts", 0, "text", "content")
+    rows = _walk(vm, "metadata", "lockupMetadataViewModel", "metadata",
+                 "contentMetadataViewModel", "metadataRows")
+    rows = rows if isinstance(rows, list) else []
+    channel = _walk(rows, 0, "metadataParts", 0, "text", "content")
+    # Remaining rows carry views/upload date; join them display-ready.
+    meta_parts = []
+    for row in rows[1:]:
+        parts = row.get("metadataParts") if isinstance(row, dict) else None
+        for part in parts if isinstance(parts, list) else []:
+            text = _walk(part, "text", "content")
+            if isinstance(text, str) and text:
+                meta_parts.append(text)
     duration = ""
     for _, badge in _find_renderers(vm.get("contentImage"),
                                     frozenset({"thumbnailBadgeViewModel"})):
@@ -275,6 +285,8 @@ def _parse_lockup(vm) -> Video | None:
         channel if isinstance(channel, str) else "",
         duration,
         thumb if isinstance(thumb, str) else "",
+        "",
+        " · ".join(meta_parts),
     )
 
 
@@ -284,6 +296,8 @@ def _parse_compact_video(vr) -> Video | None:
     if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) or title is None:
         return None
     thumb = _walk(vr, "thumbnail", "thumbnails", -1, "url")
+    meta_parts = [t for t in (_text(vr.get("shortViewCountText")),
+                              _text(vr.get("publishedTimeText"))) if t]
     return Video(
         vid,
         title,
@@ -291,6 +305,7 @@ def _parse_compact_video(vr) -> Video | None:
         _text(vr.get("lengthText")) or "",
         thumb if isinstance(thumb, str) else "",
         _channel_id(vr.get("shortBylineText")),
+        " · ".join(meta_parts),
     )
 
 

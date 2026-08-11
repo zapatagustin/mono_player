@@ -620,30 +620,55 @@ Window {
                                 readonly property bool sel:
                                     ListView.isCurrentItem
                                 width: relList.width
-                                height: 52
+                                height: 66
                                 color: sel ? th.accent : "transparent"
 
-                                Column {
+                                Row {
                                     anchors.fill: parent
                                     anchors.margins: 6
-                                    spacing: 2
-                                    Text {
-                                        width: parent.width
-                                        text: relCell.modelData.title
-                                        color: relCell.sel ? th.accentFg : th.fg
-                                        font.pixelSize: th.fontSizeSmall
-                                        elide: Text.ElideRight
-                                        maximumLineCount: 2
-                                        wrapMode: Text.WordWrap
+                                    spacing: 8
+
+                                    Rectangle {
+                                        width: 96
+                                        height: 54
+                                        color: th.bg1
+                                        Image {
+                                            anchors.fill: parent
+                                            asynchronous: true
+                                            sourceSize.width: 96
+                                            fillMode: Image.PreserveAspectCrop
+                                            source: relCell.modelData.thumb
+                                        }
                                     }
-                                    Text {
-                                        width: parent.width
-                                        text: relCell.modelData.channel
-                                              + (relCell.modelData.duration
-                                                 ? " · " + relCell.modelData.duration : "")
-                                        color: relCell.sel ? th.accentFg : th.fgDim
-                                        font.pixelSize: th.fontSizeSmall
-                                        elide: Text.ElideRight
+                                    Column {
+                                        width: parent.width - 96 - 8
+                                        spacing: 2
+                                        Text {
+                                            width: parent.width
+                                            text: relCell.modelData.title
+                                            color: relCell.sel ? th.accentFg : th.fg
+                                            font.pixelSize: th.fontSizeSmall
+                                            elide: Text.ElideRight
+                                            maximumLineCount: 2
+                                            wrapMode: Text.WordWrap
+                                        }
+                                        Text {
+                                            width: parent.width
+                                            text: relCell.modelData.channel
+                                                  + (relCell.modelData.duration
+                                                     ? " · " + relCell.modelData.duration : "")
+                                            color: relCell.sel ? th.accentFg : th.fgDim
+                                            font.pixelSize: th.fontSizeSmall
+                                            elide: Text.ElideRight
+                                        }
+                                        Text {
+                                            width: parent.width
+                                            text: relCell.modelData.meta
+                                            color: relCell.sel ? th.accentFg : th.fgDim
+                                            font.pixelSize: th.fontSizeSmall
+                                            elide: Text.ElideRight
+                                            visible: relCell.modelData.meta !== ""
+                                        }
                                     }
                                 }
                                 TapHandler {

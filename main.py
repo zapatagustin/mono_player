@@ -92,12 +92,12 @@ def main() -> int:
     tab_store = TabStore(data_dir / "mono.db")
     auth = AuthManager(tab_store)
     client = make_client()
+    thumb_cache = ThumbCache(cache_dir / "thumbs")
     feed = FeedModel(
-        client, FeedStore(data_dir / "mono.db"),
-        ThumbCache(cache_dir / "thumbs"), auth=auth,
+        client, FeedStore(data_dir / "mono.db"), thumb_cache, auth=auth,
     )
     tabs = TabManager(tab_store, url_cache=StreamUrlCache())
-    related = RelatedModel(client)
+    related = RelatedModel(client, thumb_cache=thumb_cache)
     # Prefetch related whenever the active video changes — the panel and
     # the channel jump (gc) are then instant.
     tabs.currentVideoChanged.connect(related.load)
