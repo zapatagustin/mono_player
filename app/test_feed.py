@@ -6,9 +6,11 @@ import tempfile
 from pathlib import Path
 
 from innertube import (
+    PlaylistOption,
     Video,
     parse_next,
     parse_playlist,
+    parse_playlist_options,
     parse_playlists_list,
     parse_search,
 )
@@ -232,6 +234,29 @@ def test_playlists_list_parser():
     print("playlists list parser: ok")
 
 
+def test_playlist_options_parser():
+    data = {"contents": [
+        {"playlistAddToOptionRenderer": {
+            "playlistId": "WL",
+            "title": {"runs": [{"text": "Watch later"}]},
+            "containsSelectedVideos": "ALL",
+        }},
+        {"playlistAddToOptionRenderer": {
+            "playlistId": "PLx1",
+            "title": {"runs": [{"text": "Mix"}]},
+            "containsSelectedVideos": "NONE",
+        }},
+        {"playlistAddToOptionRenderer": "garbage"},
+    ]}
+    assert parse_playlist_options(data) == [
+        PlaylistOption("WL", "Watch later", True),
+        PlaylistOption("PLx1", "Mix", False),
+    ]
+    assert parse_playlist_options({}) == []
+    assert parse_playlist_options(None) == []
+    print("playlist options parser: ok")
+
+
 def test_playlist_parser():
     def pvr(vid, title):
         return {
@@ -326,6 +351,7 @@ if __name__ == "__main__":
     test_parser()
     test_next_parser()
     test_playlists_list_parser()
+    test_playlist_options_parser()
     test_playlist_parser()
     test_thumb_cache()
     test_feed_store()

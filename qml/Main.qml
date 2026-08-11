@@ -115,9 +115,16 @@ Window {
         return false
     }
 
+    property string currentVideoId: ""
+
     Connections {
         target: tabs
         function onVideoStarted() { root.watching = true; root.refocus() }
+        function onCurrentVideoChanged(videoId) { root.currentVideoId = videoId }
+    }
+    Connections {
+        target: picker
+        function onMessage(msg) { root.notify(msg) }
     }
     Connections {
         target: feed
@@ -424,6 +431,8 @@ Window {
                     }
                     if (mode === "comments")
                         comments.loadCurrent()
+                    else if (mode === "playlist")
+                        picker.load(root.currentVideoId)
                     panelMode = mode
                 }
 
@@ -636,7 +645,10 @@ Window {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
                                 verticalAlignment: Text.AlignVCenter
-                                text: playerView.panelMode === "comments"
+                                text: playerView.panelMode === "playlist"
+                                    ? (picker.loading ? "save to — loading…"
+                                       : "save to playlist")
+                                    : playerView.panelMode === "comments"
                                     ? (comments.loading ? "comments — loading…"
                                        : "comments (" + comments.items.length
                                          + (comments.hasMore ? "+" : "") + ")")
@@ -646,6 +658,46 @@ Window {
                                 color: th.fg
                                 font.pixelSize: th.fontSizeSmall
                                 elide: Text.ElideRight
+                            }
+                        }
+
+                        ListView {
+                            id: plList
+                            width: parent.width
+                            height: parent.height - th.barHeight
+                            visible: playerView.panelMode === "playlist"
+                            clip: true
+                            model: picker.items
+                            currentIndex: 0
+
+                            delegate: Rectangle {
+                                id: plCell
+                                required property var modelData
+                                required property int index
+                                readonly property bool sel:
+                                    ListView.isCurrentItem
+                                width: plList.width
+                                height: 36
+                                color: sel ? th.accent : "transparent"
+
+                                Text {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: (plCell.modelData.contains ? "✓ " : "  ")
+                                          + plCell.modelData.title
+                                    color: plCell.sel ? th.accentFg : th.fg
+                                    font.pixelSize: th.fontSize
+                                    elide: Text.ElideRight
+                                }
+                                TapHandler {
+                                    onTapped: {
+                                        plList.currentIndex = plCell.index
+                                        picker.save(plCell.index)
+                                        playerView.panelMode = ""
+                                    }
+                                }
                             }
                         }
 
@@ -810,9 +862,12 @@ Window {
                     }
                     // Panel navigation captures j/k/enter while open.
                     if (playerView.panelMode !== "") {
-                        const isRel = playerView.panelMode === "related"
-                        const list = isRel ? relList : commList
-                        const items = isRel ? related.items : comments.items
+                        const mode = playerView.panelMode
+                        const isRel = mode === "related"
+                        const list = isRel ? relList
+                            : mode === "comments" ? commList : plList
+                        const items = isRel ? related.items
+                            : mode === "comments" ? comments.items : picker.items
                         const it = isRel && list.currentIndex >= 0
                             && list.currentIndex < items.length
                             ? items[list.currentIndex] : null
@@ -831,8 +886,11 @@ Window {
                         case Qt.Key_Return: case Qt.Key_Enter:
                             if (isRel) {
                                 if (it) tabs.playVideo(it.videoId, it.title)
-                            } else {
+                            } else if (mode === "comments") {
                                 comments.toggleReplies(commList.currentIndex)
+                            } else {
+                                picker.save(plList.currentIndex)
+                                playerView.panelMode = ""
                             }
                             event.accepted = true; return
                         case Qt.Key_T:
@@ -852,6 +910,9 @@ Window {
                             event.accepted = true; return
                         case Qt.Key_C:
                             playerView.togglePanel("comments")
+                            event.accepted = true; return
+                        case Qt.Key_B:
+                            playerView.togglePanel("playlist")
                             event.accepted = true; return
                         case Qt.Key_Escape:
                             playerView.panelMode = ""
@@ -878,10 +939,18 @@ Window {
                         playerView.togglePanel("related"); break
                     case Qt.Key_C:
                         playerView.togglePanel("comments"); break
+                    case Qt.Key_B:
+                        playerView.togglePanel("playlist"); break
                     case Qt.Key_Space: ap.togglePause(); break
                     case Qt.Key_H: case Qt.Key_Left:
                         ap.cmd(["seek", -5]); break
-                    case Qt.Key_L: case Qt.Key_Right:
+                    case Qt.Key_L:
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            feed.likeVideo(root.currentVideoId)
+                            break
+                        }
+                        ap.cmd(["seek", 5]); break
+                    case Qt.Key_Right:
                         ap.cmd(["seek", 5]); break
                     case Qt.Key_K: case Qt.Key_Up:
                         ap.cmd(["add", "volume", 5]); break
@@ -986,7 +1055,7 @@ Window {
                         : root.watching && statusline.ap && statusline.ap.loading
                         ? "loading…"
                         : root.watching
-                        ? "space pause · h/l seek · j/k vol · r related · c comments · gc channel · S subscribe · m mute · f full · gt/1-9 tab · esc back"
+                        ? "space pause · h/l seek · j/k vol · r related · c comments · b playlist · L like · S subscribe · gc channel · m mute · f full · gt/1-9 tab · esc back"
                         : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)

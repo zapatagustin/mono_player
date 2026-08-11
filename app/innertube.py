@@ -217,17 +217,7 @@ async def watch_later(client, bearer: str) -> list[Video]:
 
 
 async def add_to_watch_later(client, bearer: str, video_id: str) -> bool:
-    resp = await client.post(
-        EDIT_PLAYLIST_URL,
-        json={
-            "context": _account_context(),
-            "playlistId": "WL",
-            "actions": [{"action": "ACTION_ADD_VIDEO", "addedVideoId": video_id}],
-        },
-        headers=_account_headers(bearer),
-    )
-    resp.raise_for_status()
-    return resp.json().get("status") == "STATUS_SUCCEEDED"
+    return await add_to_playlist(client, bearer, video_id, "WL")
 
 
 NEXT_URL = "https://www.youtube.com/youtubei/v1/next"
@@ -641,6 +631,68 @@ async def list_channels(client, bearer: str) -> list[Channel]:
     )
     resp.raise_for_status()
     return parse_accounts_list(resp.json())
+
+
+@dataclass(frozen=True)
+class PlaylistOption:
+    playlist_id: str
+    title: str
+    contains: bool  # video already in this playlist
+
+
+ADD_TO_PLAYLIST_URL = \
+    "https://www.youtube.com/youtubei/v1/playlist/get_add_to_playlist"
+LIKE_URL = "https://www.youtube.com/youtubei/v1/like/like"
+
+
+def parse_playlist_options(data) -> list[PlaylistOption]:
+    options = []
+    for _, opt in _find_renderers(
+            data, frozenset({"playlistAddToOptionRenderer"})):
+        pid = opt.get("playlistId")
+        title = _text(opt.get("title"))
+        if not isinstance(pid, str) or not pid or title is None:
+            continue
+        options.append(PlaylistOption(
+            pid, title, opt.get("containsSelectedVideos") == "ALL"))
+    return options
+
+
+async def playlist_options(client, bearer: str,
+                           video_id: str) -> list[PlaylistOption]:
+    resp = await client.post(
+        ADD_TO_PLAYLIST_URL,
+        json={"context": _account_context(), "videoIds": [video_id]},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return parse_playlist_options(resp.json())
+
+
+async def add_to_playlist(client, bearer: str, video_id: str,
+                          playlist_id: str) -> bool:
+    resp = await client.post(
+        EDIT_PLAYLIST_URL,
+        json={
+            "context": _account_context(),
+            "playlistId": playlist_id,
+            "actions": [{"action": "ACTION_ADD_VIDEO",
+                         "addedVideoId": video_id}],
+        },
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return resp.json().get("status") == "STATUS_SUCCEEDED"
+
+
+async def like(client, bearer: str, video_id: str) -> bool:
+    resp = await client.post(
+        LIKE_URL,
+        json={"context": _account_context(), "target": {"videoId": video_id}},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return True
 
 
 SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"

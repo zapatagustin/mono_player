@@ -111,6 +111,9 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `j` / `k` (and ↓/↑) | volume −5 / +5 |
 | `m` | mute |
 | `s` | cycle subtitle track (statusline shows the language) |
+| `L` | like the current video |
+| `b` | save to playlist (panel picker; ✓ marks playlists that already have it) |
+| `r` / `c` | related / comments side panel (j/k navigate, enter acts) |
 | `f` | fullscreen |
 | `1`–`9`, `gt`/`gT`, `x` | tab actions, same as browse |
 | `Esc` | back to browse (tab keeps playing) |

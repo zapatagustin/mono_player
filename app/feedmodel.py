@@ -131,6 +131,23 @@ class FeedModel(QAbstractListModel):
         self._set_context("channel: " + (name or browse_id), browse_id)
 
     @Slot(str)
+    def likeVideo(self, video_id: str):
+        if video_id and self._auth is not None:
+            asyncio.create_task(self._like(video_id))
+
+    async def _like(self, video_id: str):
+        bearer = await self._auth.bearer()
+        if bearer is None:
+            self.message.emit("login required (gl)")
+            return
+        try:
+            await innertube.like(self._client, bearer, video_id)
+            self.message.emit("liked")
+        except Exception as exc:
+            print(f"feed: like failed: {exc!r}")
+            self.message.emit("like failed")
+
+    @Slot(str)
     def subscribeChannel(self, browse_id: str):
         if browse_id and self._auth is not None:
             asyncio.create_task(self._subscribe(browse_id))

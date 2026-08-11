@@ -30,6 +30,7 @@ from theme import Theme  # noqa: E402
 from feedmodel import FeedModel  # noqa: E402
 from feedstore import FeedStore  # noqa: E402
 from net import make_client  # noqa: E402
+from picker import PlaylistPicker  # noqa: E402
 from comments import CommentsModel  # noqa: E402
 from related import RelatedModel  # noqa: E402
 from tabmanager import TabManager  # noqa: E402
@@ -101,6 +102,7 @@ def main() -> int:
     tabs = TabManager(tab_store, url_cache=StreamUrlCache())
     related = RelatedModel(client, thumb_cache=thumb_cache)
     comments = CommentsModel(client)
+    picker = PlaylistPicker(client, auth)
     # Prefetch related whenever the active video changes — the panel and
     # the channel jump (gc) are then instant. Comments only track the id;
     # they load when their panel opens.
@@ -138,6 +140,7 @@ def main() -> int:
     engine.rootContext().setContextProperty("th", theme)
     engine.rootContext().setContextProperty("related", related)
     engine.rootContext().setContextProperty("comments", comments)
+    engine.rootContext().setContextProperty("picker", picker)
     engine.rootContext().setContextProperty("authAvailable", WEBENGINE)
     engine.rootContext().setContextProperty("loginProfile", None)
     engine.load(str(ROOT / "qml" / "Main.qml"))
