@@ -388,6 +388,86 @@ def parse_subscriptions(data) -> list[Video]:
     return videos
 
 
+@dataclass(frozen=True)
+class Comment:
+    author: str
+    text: str
+    likes: str
+    published: str
+    replies: str
+
+
+def parse_comments(data) -> list[Comment]:
+    """Modern shape only: commentEntityPayload mutations (framework updates).
+    Replies (replyLevel > 0) are skipped; malformed payloads too."""
+    comments = []
+    for _, payload in _find_renderers(data, frozenset({"commentEntityPayload"})):
+        props = payload.get("properties")
+        if not isinstance(props, dict):
+            continue
+        level = props.get("replyLevel")
+        if isinstance(level, int) and level > 0:
+            continue
+        text = _walk(props, "content", "content")
+        author = _walk(payload, "author", "displayName")
+        if not isinstance(text, str) or not isinstance(author, str):
+            continue
+        likes = _walk(payload, "toolbar", "likeCountNotliked")
+        replies = _walk(payload, "toolbar", "replyCount")
+        published = props.get("publishedTime")
+        comments.append(Comment(
+            author,
+            text,
+            likes if isinstance(likes, str) else "",
+            published if isinstance(published, str) else "",
+            replies if isinstance(replies, str) else "",
+        ))
+    return comments
+
+
+def parse_comments_token(data) -> str:
+    """Continuation token of the comment-item-section in a `next` response."""
+    if isinstance(data, dict):
+        if data.get("sectionIdentifier") == "comment-item-section":
+            for _, cont in _find_renderers(
+                    data, frozenset({"continuationCommand"})):
+                token = cont.get("token")
+                if isinstance(token, str) and token:
+                    return token
+        for value in data.values():
+            token = parse_comments_token(value)
+            if token:
+                return token
+    elif isinstance(data, list):
+        for item in data:
+            token = parse_comments_token(item)
+            if token:
+                return token
+    return ""
+
+
+async def comments(client, video_id: str) -> list[Comment]:
+    """Top-level comments, first page: `next` for the section token, then
+    `next {continuation}` for the payloads."""
+    headers = {"content-type": "application/json"}
+    resp = await client.post(
+        NEXT_URL,
+        json={"context": WEB_CONTEXT, "videoId": video_id},
+        headers=headers,
+    )
+    resp.raise_for_status()
+    token = parse_comments_token(resp.json())
+    if not token:
+        return []
+    resp = await client.post(
+        NEXT_URL,
+        json={"context": WEB_CONTEXT, "continuation": token},
+        headers=headers,
+    )
+    resp.raise_for_status()
+    return parse_comments(resp.json())
+
+
 SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"
 
 

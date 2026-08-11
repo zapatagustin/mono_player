@@ -385,7 +385,17 @@ Window {
 
                 property int activeTabId: -1
                 property var activePlayer: null
-                property string panelMode: ""  // "" | "related"
+                property string panelMode: ""  // "" | "related" | "comments"
+
+                function togglePanel(mode) {
+                    if (panelMode === mode) {
+                        panelMode = ""
+                        return
+                    }
+                    if (mode === "comments")
+                        comments.loadCurrent()
+                    panelMode = mode
+                }
 
                 function refreshActivePlayer() {
                     for (let i = 0; i < playersRepeater.count; i++) {
@@ -596,7 +606,10 @@ Window {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
                                 verticalAlignment: Text.AlignVCenter
-                                text: related.loading ? "related — loading…"
+                                text: playerView.panelMode === "comments"
+                                    ? (comments.loading ? "comments — loading…"
+                                       : "comments (" + comments.items.length + ")")
+                                    : related.loading ? "related — loading…"
                                     : "related" + (related.channelName !== ""
                                         ? " — " + related.channelName : "")
                                 color: th.fg
@@ -606,9 +619,81 @@ Window {
                         }
 
                         ListView {
+                            id: commList
+                            width: parent.width
+                            height: parent.height - th.barHeight
+                            visible: playerView.panelMode === "comments"
+                            clip: true
+                            model: comments.items
+                            currentIndex: 0
+                            spacing: 1
+
+                            delegate: Rectangle {
+                                id: commCell
+                                required property var modelData
+                                required property int index
+                                readonly property bool sel:
+                                    ListView.isCurrentItem
+                                width: commList.width
+                                height: commCol.implicitHeight + 12
+                                color: sel ? th.bg1 : "transparent"
+
+                                // Long text blocks mark selection with an
+                                // accent edge instead of a full accent fill.
+                                Rectangle {
+                                    width: 2
+                                    height: parent.height
+                                    color: th.accent
+                                    visible: commCell.sel
+                                }
+                                Column {
+                                    id: commCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 6
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 3
+
+                                    Row {
+                                        spacing: 6
+                                        Text {
+                                            text: commCell.modelData.author
+                                            color: th.fg
+                                            font.pixelSize: th.fontSizeSmall
+                                        }
+                                        Text {
+                                            text: commCell.modelData.published
+                                            color: th.emptyDim
+                                            font.pixelSize: th.fontSizeSmall
+                                        }
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: commCell.modelData.text
+                                        color: th.fgDim
+                                        font.pixelSize: th.fontSizeSmall
+                                        wrapMode: Text.Wrap
+                                    }
+                                    Text {
+                                        text: (commCell.modelData.likes !== ""
+                                               ? commCell.modelData.likes + " likes" : "")
+                                              + (commCell.modelData.replies !== ""
+                                                 ? "  ·  " + commCell.modelData.replies
+                                                   + " replies" : "")
+                                        color: th.emptyDim
+                                        font.pixelSize: th.fontSizeSmall
+                                        visible: text !== ""
+                                    }
+                                }
+                            }
+                        }
+
+                        ListView {
                             id: relList
                             width: parent.width
                             height: parent.height - th.barHeight
+                            visible: playerView.panelMode === "related"
                             clip: true
                             model: related.items
                             currentIndex: 0
@@ -690,18 +775,20 @@ Window {
                     }
                     // Panel navigation captures j/k/enter while open.
                     if (playerView.panelMode !== "") {
-                        const items = related.items
-                        const it = relList.currentIndex >= 0
-                            && relList.currentIndex < items.length
-                            ? items[relList.currentIndex] : null
+                        const isRel = playerView.panelMode === "related"
+                        const list = isRel ? relList : commList
+                        const items = isRel ? related.items : comments.items
+                        const it = isRel && list.currentIndex >= 0
+                            && list.currentIndex < items.length
+                            ? items[list.currentIndex] : null
                         switch (event.key) {
                         case Qt.Key_J: case Qt.Key_Down:
-                            relList.currentIndex = Math.min(
-                                items.length - 1, relList.currentIndex + 1)
+                            list.currentIndex = Math.min(
+                                items.length - 1, list.currentIndex + 1)
                             event.accepted = true; return
                         case Qt.Key_K: case Qt.Key_Up:
-                            relList.currentIndex = Math.max(
-                                0, relList.currentIndex - 1)
+                            list.currentIndex = Math.max(
+                                0, list.currentIndex - 1)
                             event.accepted = true; return
                         case Qt.Key_Return: case Qt.Key_Enter:
                             if (it) tabs.playVideo(it.videoId, it.title)
@@ -718,7 +805,13 @@ Window {
                             if (it) { tabs.playNext(it.videoId, it.title)
                                       root.notify("playing next") }
                             event.accepted = true; return
-                        case Qt.Key_R: case Qt.Key_Escape:
+                        case Qt.Key_R:
+                            playerView.togglePanel("related")
+                            event.accepted = true; return
+                        case Qt.Key_C:
+                            playerView.togglePanel("comments")
+                            event.accepted = true; return
+                        case Qt.Key_Escape:
                             playerView.panelMode = ""
                             event.accepted = true; return
                         }
@@ -727,7 +820,9 @@ Window {
                     if (!ap) return
                     switch (event.key) {
                     case Qt.Key_R:
-                        playerView.panelMode = "related"; break
+                        playerView.togglePanel("related"); break
+                    case Qt.Key_C:
+                        playerView.togglePanel("comments"); break
                     case Qt.Key_Space: ap.togglePause(); break
                     case Qt.Key_H: case Qt.Key_Left:
                         ap.cmd(["seek", -5]); break
@@ -822,7 +917,7 @@ Window {
                         : root.watching && statusline.ap && statusline.ap.loading
                         ? "loading…"
                         : root.watching
-                        ? "space pause · h/l seek · j/k vol · r related · gc channel · s subs · m mute · f full · gt/1-9 tab · x close · esc back"
+                        ? "space pause · h/l seek · j/k vol · r related · c comments · gc channel · S subscribe · m mute · f full · gt/1-9 tab · esc back"
                         : "hjkl move · enter play · t tab · a queue · p next · w later · gc channel · S subscribe · / search · gt/1-9 tab · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
