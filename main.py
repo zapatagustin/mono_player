@@ -10,7 +10,7 @@ from pathlib import Path
 
 import qasync
 from PySide6.QtCore import QStandardPaths, QTimer
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 
@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "app"))
 
 from auth import AuthManager  # noqa: E402
+from theme import Theme  # noqa: E402
 from feedmodel import FeedModel  # noqa: E402
 from feedstore import FeedStore  # noqa: E402
 from net import make_client  # noqa: E402
@@ -72,6 +73,11 @@ def main() -> int:
 
     app = QGuiApplication(sys.argv)
     app.setApplicationName("mono_player")
+
+    theme = Theme()
+    font = QFont(theme.fontFamily)
+    font.setPixelSize(theme.fontSize)
+    app.setFont(font)
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
@@ -103,6 +109,7 @@ def main() -> int:
     engine.rootContext().setContextProperty("feed", feed)
     engine.rootContext().setContextProperty("tabs", tabs)
     engine.rootContext().setContextProperty("auth", auth)
+    engine.rootContext().setContextProperty("th", theme)
     engine.rootContext().setContextProperty("authAvailable", WEBENGINE)
     engine.rootContext().setContextProperty("loginProfile", login_profile)
     engine.load(str(ROOT / "qml" / "Main.qml"))
@@ -127,6 +134,24 @@ def main() -> int:
         QTimer.singleShot(0, lambda: tabs.activate(tabs.activeIndex))
     elif len(sys.argv) > 1 and sys.argv[1] == "--login":
         QTimer.singleShot(0, lambda: auth.startLogin("dev@example.com"))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--stress":
+        # Crash repro: rapid tab/loadfile churn (AV1 decoder teardown race).
+        # Optional argv[2] = ytdl-format override (e.g. codec isolation).
+        if len(sys.argv) > 2:
+            fmt = sys.argv[2]
+            QTimer.singleShot(
+                0, lambda: tabs.mpvCommand.emit(["set", "ytdl-format", fmt]))
+        vids = ["rZHrffKAc6k", "aqz-KE-bpKQ", "dQw4w9WgXcQ"]
+        stress_timer = QTimer(interval=4000)
+        cycle = [0]
+
+        def stress():
+            tabs.playVideo(vids[cycle[0] % 3], f"stress {cycle[0]}")
+            cycle[0] += 1
+            print(f"stress: cycle {cycle[0]}")
+
+        stress_timer.timeout.connect(stress)
+        stress_timer.start()
     elif len(sys.argv) > 1:
         QTimer.singleShot(0, lambda: feed.search(sys.argv[1]))
 

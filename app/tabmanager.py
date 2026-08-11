@@ -8,6 +8,7 @@ from PySide6.QtCore import (
     QModelIndex,
     Property,
     Qt,
+    QTimer,
     Signal,
     Slot,
 )
@@ -40,9 +41,11 @@ class TabManager(QAbstractListModel):
     videoStarted = Signal()
     activeIndexChanged = Signal()
 
-    def __init__(self, store: TabStore, parent=None):
+    def __init__(self, store: TabStore, materialize_delay_ms: int = 150,
+                 parent=None):
         super().__init__(parent)
         self._store = store
+        self._materialize_delay_ms = materialize_delay_ms
         self._tabs, active_id = store.load()
         self._active = next(
             (i for i, t in enumerate(self._tabs) if t.id == active_id), -1
@@ -200,9 +203,25 @@ class TabManager(QAbstractListModel):
         self._offset = min(max(0, tab.queue_idx), max(0, len(tab.queue) - 1))
         self._materialized = tab.id
         self._loading_since = time.monotonic()
-        for cmd in materialize(tab):
-            self.mpvCommand.emit(cmd)
-        self.videoStarted.emit()
+        cmds = materialize(tab)
+        if not cmds:
+            return
+        # Stop first and let the outgoing decoder tear down before loading.
+        # ecomono: mitigates (does not close) a driver race — the iHD decoder
+        # dies under zero-copy while mpv's render thread maps an in-flight
+        # frame (vaSyncSurface segfault, repro: main.py --stress). Remove the
+        # delay when a driver/mpv update survives that stress run.
+        self.mpvCommand.emit(["stop"])
+
+        def fire():
+            for cmd in cmds:
+                self.mpvCommand.emit(cmd)
+            self.videoStarted.emit()
+
+        if self._materialize_delay_ms <= 0:
+            fire()
+        else:
+            QTimer.singleShot(self._materialize_delay_ms, fire)
 
     def _insert_tab(self, tab_id: int, queue: list[QueueItem]):
         row = len(self._tabs)

@@ -95,6 +95,8 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `/` | focus search prompt |
 | `1`–`9` | switch to tab N |
 | `gt` / `gT` | next / previous tab |
+| `gs` / `gw` | subscriptions / watch-later feed (login required) |
+| `gl` | sign in (email prompt, then webview) — or sign out when logged in |
 | `x` | close active tab |
 | `q` | quit |
 
@@ -106,6 +108,7 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `h` / `l` (and ←/→) | seek −5s / +5s |
 | `j` / `k` (and ↓/↑) | volume −5 / +5 |
 | `m` | mute |
+| `s` | cycle subtitle track (statusline shows the language) |
 | `f` | fullscreen |
 | `1`–`9`, `gt`/`gT`, `x` | tab actions, same as browse |
 | `Esc` | back to browse (tab keeps playing) |

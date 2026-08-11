@@ -89,7 +89,7 @@ def test_materialize():
 def test_manager():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
-        m = TabManager(store)
+        m = TabManager(store, materialize_delay_ms=0)
         cmds = []
         m.mpvCommand.connect(cmds.append)
 
@@ -97,7 +97,7 @@ def test_manager():
         m.playVideo("aaaaaaaaaaa", "A")
         assert m.activeIndex == 0
         assert m.rowCount() == 1
-        assert cmds == [["loadfile", url("aaaaaaaaaaa"), "replace"]]
+        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
 
         # Background tab: persisted, not materialized, active unchanged.
         cmds.clear()
@@ -108,7 +108,7 @@ def test_manager():
         # Switch: outgoing position persisted, incoming materialized.
         m.activate(1)
         assert m.activeIndex == 1
-        assert cmds == [["loadfile", url("bbbbbbbbbbb"), "replace"]]
+        assert cmds == [["stop"], ["loadfile", url("bbbbbbbbbbb"), "replace"]]
         tabs, _ = store.load()
         assert tabs[0].position_secs == 33.0
 
@@ -121,7 +121,8 @@ def test_manager():
         m.closeTab(1)
         assert m.activeIndex == 0
         assert cmds == [
-            ["loadfile", url("aaaaaaaaaaa"), "replace", -1, {"start": "33.0"}]
+            ["stop"],
+            ["loadfile", url("aaaaaaaaaaa"), "replace", -1, {"start": "33.0"}],
         ]
 
         # Closing the last tab stops playback.
@@ -136,7 +137,7 @@ def test_manager():
              QueueItem("ccccccccccc", "C")]
         tid = store.create(q)
         store.save_state(tid, 1, 0.0)
-        m = TabManager(store)
+        m = TabManager(store, materialize_delay_ms=0)
         m.mpvCommand.connect(lambda _: None)
 
         m.activate(0)  # materialized at queue_idx 1 -> offset 1
@@ -155,13 +156,13 @@ def test_manager():
 def test_enqueue_playnext():
     with tempfile.TemporaryDirectory() as tmp:
         store = make_store(tmp)
-        m = TabManager(store)
+        m = TabManager(store, materialize_delay_ms=0)
         cmds = []
         m.mpvCommand.connect(cmds.append)
 
         # Enqueue with no tabs behaves like playVideo (creates + plays).
         m.enqueue("aaaaaaaaaaa", "A")
-        assert cmds == [["loadfile", url("aaaaaaaaaaa"), "replace"]]
+        assert cmds == [["stop"], ["loadfile", url("aaaaaaaaaaa"), "replace"]]
 
         # Enqueue on the materialized active tab: sqlite grows, mpv appends.
         cmds.clear()
@@ -182,7 +183,7 @@ def test_enqueue_playnext():
 
         # On a restored (not materialized) tab: sqlite only, no mpv commands.
         store2 = make_store(tmp)
-        m2 = TabManager(store2)
+        m2 = TabManager(store2, materialize_delay_ms=0)
         cmds2 = []
         m2.mpvCommand.connect(cmds2.append)
         m2.enqueue("ddddddddddd", "D")

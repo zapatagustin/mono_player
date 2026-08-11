@@ -89,7 +89,11 @@ MpvObject::MpvObject(QQuickItem *parent) : QQuickFramebufferObject(parent)
     mpv_set_option_string(mpv, "vo", "libmpv");
     // libmpv disables ytdl by default, unlike the mpv CLI.
     mpv_set_option_string(mpv, "ytdl", "yes");
-    mpv_set_option_string(mpv, "hwdec", "auto-safe");
+    // MONO_HWDEC overrides for diagnosis/calibration (e.g. "vaapi-copy"
+    // trades ~2.3x CPU for isolating zero-copy interop issues).
+    const QByteArray hwdec = qgetenv("MONO_HWDEC");
+    mpv_set_option_string(mpv, "hwdec",
+                          hwdec.isEmpty() ? "auto-safe" : hwdec.constData());
     mpv_request_log_messages(mpv, "info");
 
     if (mpv_initialize(mpv) < 0)

@@ -2,33 +2,107 @@ import QtQuick
 import QtQuick.Controls.Basic
 import MpvBridge
 
+// TUI-style shell (DESIGN.md): flat gruvbox panels, one mono font, 28px bars,
+// vim-grammar keyboard, zero animations. Mouse works but never gates anything.
 Window {
     id: root
     width: 1280
     height: 720
     visible: true
-    color: "#111111"
+    color: th.bg
     title: "mono_player"
 
     property bool watching: false
+    property bool prompting: false
+    property string promptKind: "search"  // or "login"
+    property string pending: ""           // vim pending key ("g")
+    property string statusMsg: ""
+    readonly property string mode: prompting ? "PROMPT"
+                                 : watching ? "WATCH" : "BROWSE"
+
+    readonly property var tabGlyphs:
+        ["一", "二", "三", "四", "五", "六", "七", "八", "九"]
+
+    function notify(msg) {
+        statusMsg = msg
+        statusClear.restart()
+    }
+    Timer { id: statusClear; interval: 3000; onTriggered: root.statusMsg = "" }
+
+    function refocus() {
+        if (root.prompting) promptField.forceActiveFocus()
+        else if (root.watching) playerView.forceActiveFocus()
+        else browseKeys.forceActiveFocus()
+    }
+    onWatchingChanged: refocus()
+    onPromptingChanged: refocus()
+    Component.onCompleted: refocus()
+
+    // Vim g-prefix dispatcher, shared by browse and watch modes.
+    // Returns true when the key was consumed.
+    function gKey(event) {
+        if (root.pending === "g") {
+            root.pending = ""
+            switch (event.key) {
+            case Qt.Key_G: grid.currentIndex = 0; return true
+            case Qt.Key_T: tabs.activate(event.modifiers & Qt.ShiftModifier
+                ? (tabs.activeIndex - 1 + strip.count) % Math.max(1, strip.count)
+                : (tabs.activeIndex + 1) % Math.max(1, strip.count)); return true
+            case Qt.Key_S:
+                if (auth.loggedIn) feed.loadSubscriptions()
+                else root.notify("login required (gl)")
+                root.watching = false; return true
+            case Qt.Key_W:
+                if (auth.loggedIn) feed.loadWatchLater()
+                else root.notify("login required (gl)")
+                root.watching = false; return true
+            case Qt.Key_L:
+                if (!authAvailable) { root.notify("webengine missing"); return true }
+                if (auth.loggedIn) { auth.logout(); root.notify("signed out") }
+                else { root.promptKind = "login"; root.prompting = true }
+                return true
+            }
+            return true  // unknown g-sequence: swallow, reset
+        }
+        if (event.key === Qt.Key_G && !(event.modifiers & Qt.ShiftModifier)) {
+            root.pending = "g"
+            return true
+        }
+        return false
+    }
+
+    function tabKey(event) {
+        if (event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+            tabs.activate(event.key - Qt.Key_1)
+            return true
+        }
+        if (event.key === Qt.Key_X) {
+            if (tabs.activeIndex >= 0) tabs.closeTab(tabs.activeIndex)
+            if (tabs.activeIndex < 0) root.watching = false
+            return true
+        }
+        return false
+    }
 
     Connections {
         target: tabs
         function onMpvCommand(cmd) { player.command(cmd) }
         function onVideoStarted() {
             root.watching = true
-            playerView.forceActiveFocus()
+            playerView.loading = true
+            playerView.quality = ""
+            root.refocus()
         }
     }
 
     Column {
         anchors.fill: parent
 
-        // Tab strip: browser-style, always visible while tabs exist.
+        // Tab bar: DWM-style strip, workspace-glyph indices.
         ListView {
             id: strip
             width: parent.width
-            height: count > 0 ? 32 : 0
+            height: count > 0 ? th.barHeight : 0
             orientation: ListView.Horizontal
             model: tabs
             clip: true
@@ -40,42 +114,68 @@ Window {
                 required property bool active
 
                 width: 180
-                height: 32
-                color: active ? "#333333" : "#1a1a1a"
-                border.color: "#444444"
+                height: th.barHeight
+                color: active ? th.accent : th.bg1
+                border.color: th.bg2
+                border.width: 1
 
                 Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.left: parent.left
-                    anchors.leftMargin: 8
-                    anchors.right: closeButton.left
-                    text: tabCell.title
-                    color: tabCell.active ? "white" : "#aaaaaa"
-                    font.pixelSize: 12
+                    anchors.fill: parent
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    verticalAlignment: Text.AlignVCenter
+                    text: `[${root.tabGlyphs[tabCell.index] ?? tabCell.index + 1}] ${tabCell.title}`
+                    color: tabCell.active ? th.accentFg : th.fgDim
+                    font.pixelSize: th.fontSize
                     elide: Text.ElideRight
                 }
                 TapHandler {
-                    onTapped: {
-                        tabs.activate(tabCell.index)
-                        root.watching = true
-                    }
+                    acceptedButtons: Qt.LeftButton
+                    onTapped: { tabs.activate(tabCell.index); root.watching = true }
                 }
+                TapHandler {
+                    acceptedButtons: Qt.MiddleButton
+                    onTapped: tabs.closeTab(tabCell.index)
+                }
+            }
+        }
+
+        // Prompt strip: dmenu-style, only present while prompting.
+        Rectangle {
+            width: parent.width
+            height: root.prompting ? th.barHeight : 0
+            visible: root.prompting
+            color: th.bg
+            border.color: th.bg2
+            border.width: 1
+
+            Row {
+                anchors.fill: parent
+                anchors.leftMargin: 8
+                spacing: 8
                 Text {
-                    id: closeButton
-                    anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 24
-                    text: "×"
-                    color: "#888888"
-                    font.pixelSize: 14
-                    horizontalAlignment: Text.AlignHCenter
-                    TapHandler {
-                        onTapped: {
-                            tabs.closeTab(tabCell.index)
-                            if (tabs.activeIndex < 0)
-                                root.watching = false
-                        }
+                    text: root.promptKind === "login" ? "login:" : "/"
+                    color: th.accent
+                    font.pixelSize: th.fontSize
+                }
+                TextField {
+                    id: promptField
+                    width: parent.width - 60
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: th.fg
+                    font.pixelSize: th.fontSize
+                    placeholderText: root.promptKind === "login"
+                        ? "google account email" : ""
+                    placeholderTextColor: th.emptyDim
+                    background: null
+                    onAccepted: {
+                        if (root.promptKind === "login") auth.startLogin(text)
+                        else feed.search(text)
+                        text = ""
+                        root.prompting = false
                     }
+                    Keys.onEscapePressed: { text = ""; root.prompting = false }
                 }
             }
         }
@@ -83,74 +183,62 @@ Window {
         Item {
             width: parent.width
             height: parent.height - strip.height
+                    - (root.prompting ? th.barHeight : 0) - statusline.height
 
             // Browse: one global view outside tabs (GUIDELINE.org, UI model).
-            Column {
+            Item {
+                id: browseKeys
                 anchors.fill: parent
                 visible: !root.watching
 
-                Row {
-                    id: topBar
-                    width: parent.width
-                    height: 36
-
-                    TextField {
-                        id: searchField
-                        width: parent.width - accountBar.width
-                        height: parent.height
-                        placeholderText: "Search YouTube"
-                        color: "white"
-                        background: Rectangle { color: "#222222" }
-                        onAccepted: feed.search(text)
+                Keys.onPressed: (event) => {
+                    if (root.gKey(event) || root.tabKey(event)) {
+                        event.accepted = true
+                        return
                     }
-
-                    // Account: optional by design -- everything except sync
-                    // works logged out (GUIDELINE.org, SECURITY).
-                    Row {
-                        id: accountBar
-                        height: parent.height
-                        visible: authAvailable
-
-                        TextField {
-                            id: emailField
-                            width: 180
-                            height: parent.height
-                            visible: !auth.loggedIn
-                            placeholderText: "Google email"
-                            color: "white"
-                            background: Rectangle { color: "#1a1a1a" }
-                        }
-                        Button {
-                            height: parent.height
-                            visible: !auth.loggedIn
-                            text: "Sign in"
-                            onClicked: auth.startLogin(emailField.text)
-                        }
-                        Button {
-                            height: parent.height
-                            visible: auth.loggedIn
-                            text: "Subscriptions"
-                            onClicked: feed.loadSubscriptions()
-                        }
-                        Button {
-                            height: parent.height
-                            visible: auth.loggedIn
-                            text: "Watch later"
-                            onClicked: feed.loadWatchLater()
-                        }
-                        Button {
-                            height: parent.height
-                            visible: auth.loggedIn
-                            text: "Sign out"
-                            onClicked: auth.logout()
-                        }
+                    const cols = Math.max(1, Math.floor(grid.width / grid.cellWidth))
+                    const cur = grid.currentItem
+                    switch (event.key) {
+                    case Qt.Key_H: case Qt.Key_Left:
+                        grid.currentIndex = Math.max(0, grid.currentIndex - 1); break
+                    case Qt.Key_L: case Qt.Key_Right:
+                        grid.currentIndex = Math.min(grid.count - 1, grid.currentIndex + 1); break
+                    case Qt.Key_J: case Qt.Key_Down:
+                        grid.currentIndex = Math.min(grid.count - 1, grid.currentIndex + cols); break
+                    case Qt.Key_K: case Qt.Key_Up:
+                        grid.currentIndex = Math.max(0, grid.currentIndex - cols); break
+                    case Qt.Key_G:  // shift+g (plain g handled by gKey)
+                        grid.currentIndex = grid.count - 1; break
+                    case Qt.Key_Return: case Qt.Key_Enter:
+                        if (cur) tabs.playVideo(cur.videoId, cur.title); break
+                    case Qt.Key_T:
+                        if (cur) { tabs.openInNewTab(cur.videoId, cur.title)
+                                   root.notify("opened in new tab") } break
+                    case Qt.Key_P:
+                        if (cur) { tabs.playNext(cur.videoId, cur.title)
+                                   root.notify("playing next") } break
+                    case Qt.Key_A:
+                        if (cur) { tabs.enqueue(cur.videoId, cur.title)
+                                   root.notify("queued") } break
+                    case Qt.Key_W:
+                        if (!cur) break
+                        if (auth.loggedIn) { feed.addToWatchLater(cur.videoId)
+                                             root.notify("added to watch later") }
+                        else root.notify("login required (gl)")
+                        break
+                    case Qt.Key_Slash:
+                        root.promptKind = "search"; root.prompting = true; break
+                    case Qt.Key_Q:
+                        Qt.quit(); break
+                    default:
+                        return  // not ours: leave event.accepted false
                     }
+                    event.accepted = true
                 }
 
                 GridView {
                     id: grid
-                    width: parent.width
-                    height: parent.height - topBar.height
+                    anchors.fill: parent
                     cellWidth: 336
                     cellHeight: 264
                     cacheBuffer: 600
@@ -170,47 +258,74 @@ Window {
 
                         Component.onCompleted: feed.requestThumb(videoId)
 
-                        Column {
-                            width: 320
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            spacing: 4
-
-                            Rectangle {
-                                width: 320
-                                height: 180
-                                color: "#222222"
-                                Image {
-                                    anchors.fill: parent
-                                    asynchronous: true
-                                    sourceSize.width: 320
-                                    fillMode: Image.PreserveAspectCrop
-                                    source: cell.thumb
-                                }
-                            }
-                            Text {
-                                width: 320
-                                text: cell.title
-                                color: "white"
-                                font.pixelSize: 14
-                                elide: Text.ElideRight
-                                maximumLineCount: 2
-                                wrapMode: Text.WordWrap
-                            }
-                            Text {
-                                width: 320
-                                text: cell.channel + (cell.duration ? "  ·  " + cell.duration : "")
-                                color: "#aaaaaa"
-                                font.pixelSize: 12
-                                elide: Text.ElideRight
+                        // Selection frame: the system-wide active mark.
+                        // ecomono: Rectangle gradients are H/V only; the
+                        // config's 45deg needs a ShaderEffect - not worth it.
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: 3
+                            visible: cell.GridView.isCurrentItem
+                            gradient: Gradient {
+                                orientation: Gradient.Horizontal
+                                GradientStop { position: 0; color: th.accent }
+                                GradientStop { position: 1; color: th.accent2 }
                             }
                         }
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: cell.GridView.isCurrentItem ? 4 : 3
+                            color: th.bg
+                            border.color: cell.GridView.isCurrentItem
+                                ? "transparent" : th.bg2
+                            border.width: 1
+
+                            Column {
+                                anchors.fill: parent
+                                anchors.margins: 4
+                                spacing: 3
+
+                                Rectangle {
+                                    width: parent.width
+                                    height: 180
+                                    color: th.bg1
+                                    Image {
+                                        anchors.fill: parent
+                                        asynchronous: true
+                                        sourceSize.width: 320
+                                        fillMode: Image.PreserveAspectCrop
+                                        source: cell.thumb
+                                    }
+                                }
+                                Text {
+                                    width: parent.width
+                                    text: cell.title
+                                    color: th.fg
+                                    font.pixelSize: th.fontSize
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 2
+                                    wrapMode: Text.WordWrap
+                                }
+                                Text {
+                                    width: parent.width
+                                    text: cell.channel
+                                          + (cell.duration ? " · " + cell.duration : "")
+                                    color: th.fgDim
+                                    font.pixelSize: th.fontSizeSmall
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+                        required property int index
                         TapHandler {
                             acceptedButtons: Qt.LeftButton
-                            onTapped: tabs.playVideo(cell.videoId, cell.title)
+                            onTapped: {
+                                grid.currentIndex = cell.index
+                                tabs.playVideo(cell.videoId, cell.title)
+                            }
                         }
                         TapHandler {
                             acceptedButtons: Qt.RightButton
-                            onTapped: cellMenu.popup()
+                            onTapped: { grid.currentIndex = cell.index; cellMenu.popup() }
                         }
                         Menu {
                             id: cellMenu
@@ -244,6 +359,10 @@ Window {
                 property real position: 0
                 property real duration: 0
                 property bool paused: false
+                property string decode: ""
+                property string quality: ""
+                property bool loading: false
+                property int volume: 100
 
                 function fmt(s) {
                     s = Math.max(0, Math.floor(s))
@@ -260,16 +379,30 @@ Window {
                     anchors.fill: parent
 
                     Component.onCompleted: {
-                        // ecomono: hardcoded AV1 format string, valid for this
-                        // machine's verified VA-API caps; the format-policy
-                        // milestone probes at startup instead.
+                        // ecomono: VP9-first. AV1 + zero-copy segfaults in the
+                        // iHD driver's Av1Pipeline on decoder teardown (repro:
+                        // main.py --stress). Re-prefer AV1 when a driver
+                        // update survives that stress run.
                         player.setProperty("ytdl-format",
-                            "bv*[vcodec^=av01][height<=?4320]+ba/bv*[vcodec^=vp9]+ba/b")
+                            "bv*[vcodec^=vp9][height<=?4320]+ba/bv*+ba/b")
+                        // Ask yt-dlp for subtitle tracks, else ytdl_hook adds
+                        // none and the subs key has nothing to cycle.
+                        player.setProperty("ytdl-raw-options",
+                            'sub-langs="es.*,en.*",write-subs=')
                     }
 
                     onPlaybackTimeChanged: (secs) => {
                         tabs.playbackTime(secs)
                         playerView.position = secs
+                        if (playerView.loading) {
+                            playerView.loading = false
+                            const p = player.getProperty("video-params")
+                            const fps = player.getProperty("container-fps")
+                            if (p && p.h)
+                                playerView.quality = p.h + "p"
+                                    + (fps ? Math.round(fps) : "")
+                                    + " " + (player.getProperty("video-format") ?? "")
+                        }
                     }
                     onPlaylistPosChanged: (pos) => tabs.playlistPos(pos)
                     onDurationChanged: (secs) => playerView.duration = secs
@@ -279,89 +412,169 @@ Window {
                         // decode decision — always worth surfacing.
                         if (level === "error" || level === "warn" || prefix === "vd")
                             console.log(`[${prefix}] ${level}: ${text}`)
+                        if (prefix === "vd" && text.indexOf("hardware decoding") >= 0)
+                            playerView.decode = (text.match(/\((.+)\)/) ?? [,"hw"])[1]
+                        else if (prefix === "vd" && text.indexOf("software decoding") >= 0)
+                            playerView.decode = "sw"
                     }
                 }
 
-                // Controls overlay: shown on mouse movement, fades out after
-                // a moment of stillness.
-                HoverHandler {
-                    onPointChanged: controls.poke()
+                function bumpVolume(delta) {
+                    player.command(["add", "volume", delta])
+                    const v = player.getProperty("volume")
+                    if (v !== undefined && v !== null)
+                        playerView.volume = Math.round(v)
                 }
 
-                Rectangle {
-                    id: controls
-                    anchors.bottom: parent.bottom
-                    width: parent.width
-                    height: 48
-                    color: "#cc111111"
-                    visible: opacity > 0
-                    opacity: 0
-
-                    function poke() {
-                        opacity = 1
-                        hideTimer.restart()
-                    }
-                    Behavior on opacity { NumberAnimation { duration: 200 } }
-                    Timer {
-                        id: hideTimer
-                        interval: 2500
-                        onTriggered: if (!seekBar.pressed) controls.opacity = 0
-                    }
-
-                    Row {
-                        anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 12
-                        spacing: 12
-
-                        Text {
-                            width: 24
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: playerView.paused ? "▶" : "⏸"
-                            color: "white"
-                            font.pixelSize: 18
-                            TapHandler {
-                                onTapped: player.command(["cycle", "pause"])
-                            }
-                        }
-                        Slider {
-                            id: seekBar
-                            width: parent.width - 24 - 110 - 2 * parent.spacing
-                            anchors.verticalCenter: parent.verticalCenter
-                            from: 0
-                            to: Math.max(playerView.duration, 0.1)
-                            value: pressed ? value : playerView.position
-                            onMoved: player.command(["seek", value, "absolute"])
-                        }
-                        Text {
-                            width: 110
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: playerView.fmt(playerView.position) + " / "
-                                  + playerView.fmt(playerView.duration)
-                            color: "#cccccc"
-                            font.pixelSize: 12
-                            horizontalAlignment: Text.AlignRight
-                        }
-                    }
-                }
-
-                Keys.onSpacePressed: player.command(["cycle", "pause"])
-                Keys.onLeftPressed: player.command(["seek", -5])
-                Keys.onRightPressed: player.command(["seek", 5])
-                Keys.onUpPressed: player.command(["add", "volume", 5])
-                Keys.onDownPressed: player.command(["add", "volume", -5])
                 Keys.onPressed: (event) => {
-                    if (event.key === Qt.Key_M) {
-                        player.command(["cycle", "mute"])
+                    if (root.gKey(event) || root.tabKey(event)) {
                         event.accepted = true
-                    } else if (event.key === Qt.Key_F) {
+                        return
+                    }
+                    switch (event.key) {
+                    case Qt.Key_Space: player.command(["cycle", "pause"]); break
+                    case Qt.Key_H: case Qt.Key_Left:
+                        player.command(["seek", -5]); break
+                    case Qt.Key_L: case Qt.Key_Right:
+                        player.command(["seek", 5]); break
+                    case Qt.Key_K: case Qt.Key_Up: bumpVolume(5); break
+                    case Qt.Key_J: case Qt.Key_Down: bumpVolume(-5); break
+                    case Qt.Key_M: player.command(["cycle", "mute"]); break
+                    case Qt.Key_S: {
+                        player.command(["cycle", "sub"])
+                        const lang = player.getProperty("current-tracks/sub/lang")
+                            ?? player.getProperty("current-tracks/sub/title")
+                        root.notify("sub: " + (lang ?? "off"))
+                        break
+                    }
+                    case Qt.Key_F:
                         root.visibility = root.visibility === Window.FullScreen
                             ? Window.Windowed : Window.FullScreen
-                        event.accepted = true
+                        break
+                    case Qt.Key_Escape: root.watching = false; break
+                    default:
+                        return
+                    }
+                    event.accepted = true
+                }
+
+                // Mouse never gates: click toggles pause, wheel seeks.
+                TapHandler {
+                    onTapped: player.command(["cycle", "pause"])
+                }
+            }
+        }
+
+        // Statusline: always visible, the TUI way. Mode | title | segments.
+        Rectangle {
+            id: statusline
+            width: parent.width
+            height: th.barHeight
+            color: th.bg1
+
+            Row {
+                anchors.fill: parent
+                spacing: 0
+
+                Rectangle {
+                    width: modeTag.width + 16
+                    height: parent.height
+                    color: th.accent
+                    Text {
+                        id: modeTag
+                        anchors.centerIn: parent
+                        text: root.mode
+                        color: th.accentFg
+                        font.pixelSize: th.fontSize
                     }
                 }
-                // Back to browse; the tab keeps playing, browser-style.
-                Keys.onEscapePressed: root.watching = false
+                Rectangle { width: 1; height: parent.height; color: th.bg2 }
+
+                Text {
+                    width: parent.width - x - rightSegments.width
+                    height: parent.height
+                    verticalAlignment: Text.AlignVCenter
+                    leftPadding: 8
+                    text: root.statusMsg !== "" ? root.statusMsg
+                        : root.watching && playerView.loading ? "loading…"
+                        : root.watching
+                        ? "space pause · h/l seek · j/k vol · s subs · m mute · f full · gt/1-9 tab · x close · esc back"
+                        : "hjkl move · enter play · t tab · a queue · p next · w later · / search · gt/1-9 tab · gs subs · gw later · gl login · q quit"
+                    color: root.statusMsg !== "" || (root.watching && playerView.loading)
+                        ? th.fg : th.fgDim
+                    font.pixelSize: th.fontSizeSmall
+                    elide: Text.ElideRight
+                }
+
+                Row {
+                    id: rightSegments
+                    height: parent.height
+                    visible: root.watching
+
+                    Rectangle { width: 1; height: parent.height; color: th.bg2 }
+                    Item {
+                        width: 158
+                        height: parent.height
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: 4
+                            width: 150
+                            height: 6
+                            color: th.bg2
+                            Rectangle {
+                                width: playerView.duration > 0
+                                    ? parent.width * Math.min(1, playerView.position / playerView.duration)
+                                    : 0
+                                height: parent.height
+                                color: th.accent
+                            }
+                        }
+                    }
+                    Rectangle { width: 1; height: parent.height; color: th.bg2 }
+                    Text {
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 8
+                        rightPadding: 8
+                        text: playerView.fmt(playerView.position) + " / "
+                              + playerView.fmt(playerView.duration)
+                        color: th.fg
+                        font.pixelSize: th.fontSizeSmall
+                    }
+                    Rectangle { width: 1; height: parent.height; color: th.bg2 }
+                    Text {
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 8
+                        rightPadding: 8
+                        text: (playerView.paused ? "||" : "|>")
+                              + `  vol ${playerView.volume}`
+                        color: th.fgDim
+                        font.pixelSize: th.fontSizeSmall
+                    }
+                    Rectangle { width: 1; height: parent.height; color: th.bg2 }
+                    Text {
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 8
+                        rightPadding: 8
+                        text: playerView.quality
+                        color: th.fgDim
+                        font.pixelSize: th.fontSizeSmall
+                        visible: playerView.quality !== ""
+                    }
+                    Rectangle { width: 1; height: parent.height; color: th.bg2 }
+                    Text {
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 8
+                        rightPadding: 8
+                        text: playerView.decode
+                        color: playerView.decode === "sw" ? th.red : th.green
+                        font.pixelSize: th.fontSizeSmall
+                        visible: playerView.decode !== ""
+                    }
+                }
             }
         }
     }
