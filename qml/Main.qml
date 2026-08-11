@@ -90,7 +90,9 @@ Window {
         function onVideoStarted() {
             root.watching = true
             playerView.loading = true
-            playerView.quality = ""
+            playerView.vHeight = 0
+            playerView.vFps = 0
+            playerView.vFormat = ""
             root.refocus()
         }
     }
@@ -360,9 +362,16 @@ Window {
                 property real duration: 0
                 property bool paused: false
                 property string decode: ""
-                property string quality: ""
                 property bool loading: false
                 property int volume: 100
+                property int vHeight: 0
+                property real vFps: 0
+                property string vFormat: ""
+                property string subLang: ""
+                readonly property string quality: vHeight > 0
+                    ? vHeight + "p" + (vFps > 0 ? Math.round(vFps) : "")
+                      + (vFormat !== "" ? " " + vFormat : "")
+                    : ""
 
                 function fmt(s) {
                     s = Math.max(0, Math.floor(s))
@@ -389,20 +398,37 @@ Window {
                         // none and the subs key has nothing to cycle.
                         player.setProperty("ytdl-raw-options",
                             'sub-langs="es.*,en.*",write-subs=')
+                        // Runtime UI state arrives via async observers only —
+                        // synchronous getProperty during load deadlocks.
+                        player.observe("volume")
+                        player.observe("video-params")
+                        player.observe("container-fps")
+                        player.observe("video-format")
+                        player.observe("current-tracks/sub/lang")
+                    }
+
+                    onPropertyChanged: (name, value) => {
+                        switch (name) {
+                        case "volume":
+                            if (value !== undefined && value !== null)
+                                playerView.volume = Math.round(value)
+                            break
+                        case "video-params":
+                            playerView.vHeight = value && value.h ? value.h : 0
+                            break
+                        case "container-fps":
+                            playerView.vFps = value ?? 0; break
+                        case "video-format":
+                            playerView.vFormat = value ?? ""; break
+                        case "current-tracks/sub/lang":
+                            playerView.subLang = value ?? ""; break
+                        }
                     }
 
                     onPlaybackTimeChanged: (secs) => {
                         tabs.playbackTime(secs)
                         playerView.position = secs
-                        if (playerView.loading) {
-                            playerView.loading = false
-                            const p = player.getProperty("video-params")
-                            const fps = player.getProperty("container-fps")
-                            if (p && p.h)
-                                playerView.quality = p.h + "p"
-                                    + (fps ? Math.round(fps) : "")
-                                    + " " + (player.getProperty("video-format") ?? "")
-                        }
+                        playerView.loading = false
                     }
                     onPlaylistPosChanged: (pos) => tabs.playlistPos(pos)
                     onDurationChanged: (secs) => playerView.duration = secs
@@ -421,9 +447,7 @@ Window {
 
                 function bumpVolume(delta) {
                     player.command(["add", "volume", delta])
-                    const v = player.getProperty("volume")
-                    if (v !== undefined && v !== null)
-                        playerView.volume = Math.round(v)
+                    // display updates via the volume observer
                 }
 
                 Keys.onPressed: (event) => {
@@ -440,13 +464,9 @@ Window {
                     case Qt.Key_K: case Qt.Key_Up: bumpVolume(5); break
                     case Qt.Key_J: case Qt.Key_Down: bumpVolume(-5); break
                     case Qt.Key_M: player.command(["cycle", "mute"]); break
-                    case Qt.Key_S: {
+                    case Qt.Key_S:
                         player.command(["cycle", "sub"])
-                        const lang = player.getProperty("current-tracks/sub/lang")
-                            ?? player.getProperty("current-tracks/sub/title")
-                        root.notify("sub: " + (lang ?? "off"))
                         break
-                    }
                     case Qt.Key_F:
                         root.visibility = root.visibility === Window.FullScreen
                             ? Window.Windowed : Window.FullScreen
@@ -562,6 +582,17 @@ Window {
                         color: th.fgDim
                         font.pixelSize: th.fontSizeSmall
                         visible: playerView.quality !== ""
+                    }
+                    Rectangle { width: 1; height: parent.height; color: th.bg2 }
+                    Text {
+                        height: parent.height
+                        verticalAlignment: Text.AlignVCenter
+                        leftPadding: 8
+                        rightPadding: 8
+                        text: "sub " + playerView.subLang
+                        color: th.fgDim
+                        font.pixelSize: th.fontSizeSmall
+                        visible: playerView.subLang !== ""
                     }
                     Rectangle { width: 1; height: parent.height; color: th.bg2 }
                     Text {

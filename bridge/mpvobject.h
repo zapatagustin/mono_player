@@ -22,12 +22,17 @@ public:
     Q_INVOKABLE void command(const QVariant &params);
     Q_INVOKABLE void setProperty(const QString &name, const QVariant &value);
     Q_INVOKABLE QVariant getProperty(const QString &name) const;
+    // Async property watching. getProperty is synchronous and can deadlock
+    // the GUI<->core<->render-thread triangle while the core is loading;
+    // runtime UI state must come through here instead.
+    Q_INVOKABLE void observe(const QString &name);
 
 signals:
     void playlistPosChanged(qint64 pos);
     void playbackTimeChanged(double secs);
     void durationChanged(double secs);
     void pauseChanged(bool paused);
+    void propertyChanged(QString name, QVariant value);
     void logMessage(QString prefix, QString level, QString text);
 
 private slots:

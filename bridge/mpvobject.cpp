@@ -165,6 +165,11 @@ QVariant MpvObject::getProperty(const QString &name) const
     return v;
 }
 
+void MpvObject::observe(const QString &name)
+{
+    mpv_observe_property(mpv, 1, name.toUtf8().constData(), MPV_FORMAT_NODE);
+}
+
 void MpvObject::onMpvRedraw(void *ctx)
 {
     QMetaObject::invokeMethod(static_cast<MpvObject *>(ctx), "doUpdate",
@@ -197,6 +202,16 @@ void MpvObject::handleEvent(mpv_event *event)
     switch (event->event_id) {
     case MPV_EVENT_PROPERTY_CHANGE: {
         auto *prop = static_cast<mpv_event_property *>(event->data);
+        if (event->reply_userdata == 1) {
+            // Dynamically observed (observe()): NODE payload, generic signal.
+            // FORMAT_NONE means the property became unavailable.
+            emit propertyChanged(
+                QString::fromUtf8(prop->name),
+                prop->format == MPV_FORMAT_NODE
+                    ? nodeToVariant(static_cast<mpv_node *>(prop->data))
+                    : QVariant());
+            break;
+        }
         if (std::strcmp(prop->name, "playlist-pos") == 0 &&
             prop->format == MPV_FORMAT_INT64)
             emit playlistPosChanged(*static_cast<qint64 *>(prop->data));
