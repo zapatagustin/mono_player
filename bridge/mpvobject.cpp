@@ -100,9 +100,9 @@ MpvObject::MpvObject(QQuickItem *parent) : QQuickFramebufferObject(parent)
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG);
     mpv_set_wakeup_callback(mpv, MpvObject::wakeup, this);
-
-    // GL FBOs are bottom-up; the scene graph samples top-down.
-    setMirrorVertically(true);
+    // Orientation: mpv draws into the FBO with flip_y=0 and the scene graph
+    // samples it upright as-is — no mirrorVertically, no flip. Adding either
+    // shows the video upside down (verified on Wayland/EGL).
 }
 
 MpvObject::~MpvObject()
