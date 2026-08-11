@@ -1,0 +1,157 @@
+"""Google account auth via gpsoauth (the protocol microG speaks). The master
+token grants the whole account: it lives in the Secret Service keyring only —
+never a file, never a log line, never sqlite. Bearer tokens are short-lived
+and never persisted. Login is optional; only sync features need it."""
+
+import asyncio
+import secrets
+import time
+
+from PySide6.QtCore import Property, QObject, Signal, Slot
+
+KEYRING_SERVICE = "mono_player"
+
+# InnerTube ANDROID scope: the official YouTube app's oauth service triplet.
+YT_SERVICE = "oauth2:https://www.googleapis.com/auth/youtube"
+YT_APP = "com.google.android.youtube"
+YT_CLIENT_SIG = "24bb24c05e47e0aefa68a58a766179d9b613a600"
+
+BEARER_TTL_FALLBACK = 3000.0  # gpsoauth may omit Expiry; ~50min is safe
+BEARER_SLACK = 60.0
+
+
+def cookie_token(cookie) -> str | None:
+    """The oauth_token cookie google sets after EmbeddedSetup login."""
+    if bytes(cookie.name()).decode(errors="replace") != "oauth_token":
+        return None
+    if "google" not in cookie.domain():
+        return None
+    return bytes(cookie.value()).decode(errors="replace")
+
+
+class AuthManager(QObject):
+    loggedInChanged = Signal()
+    showLoginChanged = Signal()
+    loginError = Signal(str)
+
+    def __init__(self, store, keyring_mod=None, exchange_fn=None, oauth_fn=None,
+                 now_fn=None, parent=None):
+        super().__init__(parent)
+        if keyring_mod is None:
+            import keyring as keyring_mod
+        if exchange_fn is None or oauth_fn is None:
+            import gpsoauth
+            exchange_fn = exchange_fn or gpsoauth.exchange_token
+            oauth_fn = oauth_fn or gpsoauth.perform_oauth
+        self._store = store
+        self._keyring = keyring_mod
+        self._exchange_fn = exchange_fn
+        self._oauth_fn = oauth_fn
+        self._now = now_fn or time.time
+
+        aid = store.meta_get("android_id")
+        if not aid:
+            aid = secrets.token_hex(8)
+            store.meta_set("android_id", aid)
+        self._android_id = aid
+
+        self._email = store.meta_get("auth_email")
+        self._pending_email = None
+        self._show_login = False
+        self._bearer = None
+        self._bearer_expiry = 0.0
+
+    # --- properties ---
+
+    def _get_logged_in(self) -> bool:
+        return self._email is not None and self._master() is not None
+
+    loggedIn = Property(bool, _get_logged_in, notify=loggedInChanged)
+
+    def _get_show_login(self) -> bool:
+        return self._show_login
+
+    showLogin = Property(bool, _get_show_login, notify=showLoginChanged)
+
+    def _master(self) -> str | None:
+        if self._email is None:
+            return None
+        try:
+            return self._keyring.get_password(KEYRING_SERVICE, self._email)
+        except Exception as exc:
+            print(f"auth: keyring unavailable: {type(exc).__name__}")
+            return None
+
+    # --- login flow ---
+
+    @Slot(str)
+    def startLogin(self, email: str):
+        email = email.strip()
+        if not email:
+            return
+        self._pending_email = email
+        self._set_show_login(True)
+
+    @Slot()
+    def cancelLogin(self):
+        self._pending_email = None
+        self._set_show_login(False)
+
+    def onCookieAdded(self, cookie):
+        token = cookie_token(cookie)
+        if token and self._pending_email:
+            asyncio.get_event_loop().create_task(self._exchange(token))
+
+    async def _exchange(self, oauth_token: str):
+        email = self._pending_email
+        resp = await asyncio.to_thread(
+            self._exchange_fn, email, oauth_token, self._android_id
+        )
+        master = resp.get("Token")
+        if not master:
+            self.loginError.emit(resp.get("Error", "token exchange failed"))
+            return
+        self._keyring.set_password(KEYRING_SERVICE, email, master)
+        self._store.meta_set("auth_email", email)
+        self._email = email
+        self._pending_email = None
+        self._set_show_login(False)
+        self.loggedInChanged.emit()
+
+    # --- bearer tokens (minted on demand, never persisted) ---
+
+    async def bearer(self) -> str | None:
+        if not self._get_logged_in():
+            return None
+        if self._bearer and self._now() < self._bearer_expiry - BEARER_SLACK:
+            return self._bearer
+        resp = await asyncio.to_thread(
+            self._oauth_fn, self._email, self._master(), self._android_id,
+            YT_SERVICE, YT_APP, YT_CLIENT_SIG,
+        )
+        auth = resp.get("Auth")
+        if not auth:
+            self.loginError.emit(resp.get("Error", "bearer mint failed"))
+            return None
+        self._bearer = auth
+        self._bearer_expiry = float(
+            resp.get("Expiry", self._now() + BEARER_TTL_FALLBACK)
+        )
+        return auth
+
+    @Slot()
+    def logout(self):
+        if self._email is not None:
+            try:
+                self._keyring.delete_password(KEYRING_SERVICE, self._email)
+            except Exception:
+                pass
+        self._store.meta_set("auth_email", None)
+        self._email = None
+        self._bearer = None
+        self.loggedInChanged.emit()
+
+    def _set_show_login(self, value: bool):
+        if value != self._show_login:
+            self._show_login = value
+            self.showLoginChanged.emit()

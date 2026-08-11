@@ -1,0 +1,322 @@
+#+title: mono_player — Project Guideline
+#+author: agustin
+#+date: 2026-08-10
+
+Native Wayland YouTube client. Qt Quick UI over libmpv; yt-dlp runs as
+mpv's ytdl_hook subprocess. The differentiating feature is browser-style
+*tabs* over a single player instance — no existing client has this.
+Everything else (queue, feeds, subscriptions, search) exists elsewhere and
+is deliberately built the boring way.
+
+* Design principles
+
+- The app is glue. All heavy work is delegated to code that already exists
+  and is maintained by someone else: mpv decodes, yt-dlp extracts, sqlite
+  persists, the compositor composites. Our code holds state and draws a UI.
+- Never implement YouTube extraction. yt-dlp has hundreds of contributors
+  and still suffers breakage days when Google moves; a solo project does
+  not survive that race. If yt-dlp can't do it, the feature waits.
+- Playback must never depend on login, and login must never be required.
+  Two independent failure domains (see Architecture).
+- Performance target: beat Chrome-on-YouTube on the same machine, measured,
+  not assumed. We win by not doing work (no DOM, no telemetry, no JS
+  buffering logic), not by micro-optimizing.
+
+* Architecture
+
+The account never touches playback:
+
+#+begin_example
+  PLAYBACK layer   mpv ytdl_hook (yt-dlp subprocess, anonymous)
+                   + PO token provider -> libmpv
+                   No account. Ever.
+
+  BROWSE data      InnerTube anonymous: related videos, search, trending.
+                   Logged out, this IS the whole browse experience.
+
+  ACCOUNT layer    gpsoauth Bearer -> InnerTube (client ANDROID)
+                   subscriptions/history/playlists only.
+                   Never used for stream URLs.
+#+end_example
+
+If Google breaks PO tokens, the feed still loads. If auth breaks, videos
+still play. One incident never takes down both.
+
+** Login (decided: gpsoauth, not cookies)
+
+- microG is Android-only; what we implement is the protocol microG speaks:
+  device registration -> master token -> scoped Bearer tokens. The
+  =gpsoauth= Python library does this and is maintained (Aurora Store
+  proves the flow alive as of mid-2026).
+- Cookies as the *session mechanism* were rejected: they expire, they
+  entangle playback with the PO-token session binding, and reading a
+  browser's cookie DB is fragile and invasive.
+- QtWebEngine is allowed in exactly ONE place: the login screen, loaded on
+  demand and torn down afterwards. An external browser can never hand the
+  =oauth_token= cookie back to the app, so a minimal embedded webview is
+  the only non-invasive path (it is what microG/Aurora do). Chromium never
+  runs during browsing or playback; the performance premise holds.
+- Flow, once per install: embedded webview -> accounts.google.com/EmbeddedSetup
+  -> intercept =oauth_token= cookie -> =gpsoauth.exchange_token()= -> master
+  token (=aas_et/...=) -> OS keyring. Then =perform_oauth()= mints ~1h Bearer
+  tokens on demand; those are never persisted.
+- 2FA accounts cannot password-login; the browser flow is the only path.
+  Design that screen properly.
+
+** SECURITY — non-negotiable, the lazy ladder does not apply here
+
+- The master token grants the *entire* Google account. It lives in the
+  Secret Service keyring via =keyring=. Never a file, never a log line,
+  never telemetry, never an environment variable.
+- Login is optional; every feature except sync works logged out. This is
+  both ban mitigation (real account + unofficial client = flag risk) and
+  the honest default.
+- Input validation at the InnerTube parsing boundary: Google's responses
+  change shape without notice; malformed data must degrade, not crash.
+
+* UI model
+
+** Tabs (the feature)
+
+Three distinct structures — do not merge them:
+
+| Structure   | Semantics                             | Lives in            |
+|-------------+---------------------------------------+---------------------|
+| Queue       | per tab, ordered, auto-advances       | sqlite; materialized into mpv playlist |
+| Tabs        | parallel playback contexts            | local sqlite        |
+| Watch later | persistent, unordered                 | YouTube =WL= playlist |
+
+- ONE libmpv instance, always. A tab is a playback context
+  ={queue: [video_id], queue_idx, position_secs}=, not a player. Every
+  queue lives in sqlite; mpv's playlist is a materialization of the
+  ACTIVE tab only — so queues survive restarts for free.
+- Tab switch: persist =playback-time= + =playlist-pos= of the outgoing
+  tab, then =loadfile <first> replace start=<pos>= plus =loadfile append=
+  for the rest. =loadfile replace= clears mpv's playlist (man mpv 0.41) —
+  here that is the mechanism, not a hazard.
+- Sync is one-way. UI writes to mpv (=loadfile <url> append-play= is
+  "enqueue", =playlist-move= is "play next"); only the =playlist-pos= and
+  =playback-time= observers flow back into sqlite. mpv is never the
+  source of truth.
+- Browse (feed, channel, search) is ONE global view outside tabs; scroll
+  position belongs to that view. Tabs hold playback, nothing else.
+- Related videos are a function of =video_id=, not tab state: anonymous
+  InnerTube =next= for the current video, LRU-cached like thumbnails
+  (yt-dlp does not extract related). Click replaces the active tab's
+  video; new-tab / enqueue via context menu. No per-tab history — YAGNI,
+  add if it hurts.
+- "Watch later" maps to the account's real =WL= playlist via InnerTube, so
+  cross-device sync comes free. Tabs and queues are local; YouTube has no
+  concept of them and nothing gets invented server-side.
+- Mini-player / PiP is a Hyprland windowrule on the window title, shipped
+  as a README snippet — not code:
+  #+begin_example
+  windowrulev2 = float, title:^(mono_player — mini)$
+  windowrulev2 = pin,   title:^(mono_player — mini)$
+  #+end_example
+
+** Rendering
+
+- Wayland has no foreign-window embedding: =wid=/=winId()= does NOT work.
+  Video renders through =mpv_render_context= into a
+  =QQuickFramebufferObject::Renderer= (see
+  =mpv-examples/libmpv= for the reference Qt Quick integration). This is
+  the robust path per mpv docs, and it makes the video a real QML item:
+  tabs, overlays and animation compose naturally.
+- Language split: the mpv<->Qt bridge is ONE C++ file (written once),
+  registered as a QML type. The bridge OWNS the =mpv_handle=
+  (=mpv_create=/=mpv_initialize=) and is the single mpv facade:
+  =Q_INVOKABLE command()= / property get/set, Qt signals for observed
+  properties (=playlist-pos=, =playback-time=) and log messages. Python
+  and QML never touch libmpv directly; python-mpv is out. The bulk of the
+  file is mechanical =QVariant= <-> =mpv_node= conversion.
+  Everything else is Python/PySide6.
+  Python performance is irrelevant — there is no hot loop in our code; if
+  a model ever janks, lowering that one model to C++ is a localized
+  refactor, done after measuring, not before.
+- Feed grid rules (these ARE the performance):
+  - =GridView= with fixed =cellWidth=/=cellHeight= — zero relayout on load.
+  - =Image { asynchronous: true; sourceSize.width: 320 }= — decode off the
+    UI thread, AT display size (~350KB vs ~3.5MB per thumbnail in RAM).
+  - Delegates hold data from the model only; no Python calls in bindings
+    evaluated during scroll (GIL).
+  - Measure with =QSG_RENDER_TIMING=1=; target <16ms frame time.
+
+** Network (where we'd lose to Chrome if lazy)
+
+- ONE =httpx.AsyncClient= app-wide: HTTP/2 multiplexing, pooled
+  connections. A client per request costs a TLS handshake each time.
+- Concurrency semaphore ~8 for thumbnails; more saturates, doesn't speed up.
+- Disk LRU cache keyed by video id: scrolling back up = zero network.
+- Fetch visible + =cacheBuffer= only; never prefetch a 200-item feed.
+- Cold start: paint the cached feed from sqlite before any network — first
+  content in ~200ms perceived, fetch continues behind it.
+
+* Format selection
+
+Hardware verified on surface (i7-1185G7, Iris Xe / Gen12, iHD 26.2.4):
+=VAProfileAV1Profile0= and =VP9Profile0..3= under =VAEntrypointVLD=.
+End-to-end confirmed: real 4K60 AV1 from YouTube plays with
+"Using hardware decoding (vaapi)".
+
+- The yt-dlp format string is built at startup from probed VA-API caps and
+  cached — never hardcoded. Extraction runs in mpv's ytdl_hook (subprocess),
+  never in-process: the string is applied via mpv's =ytdl-format= property.
+  Library-mode extraction (EDL pairing, expiry, retries — all ours) is the
+  documented upgrade path only if error UX ever demands it; error surface
+  today is =MPV_EVENT_LOG_MESSAGE= parsing. AV1 requested only where the silicon decodes
+  it; software dav1d at 4K+ is a stutter generator, and blind AV1 requests
+  would make us slower than Chrome on half the machines.
+  #+begin_example
+  with AV1 hw:  bv*[vcodec^=av01][height<=?4320]+ba/bv*[vcodec^=vp9]+ba/b
+  without:      bv*[vcodec^=vp9][height<=?2160]+ba/b
+  #+end_example
+- 8K on an iGPU is "exposed" but bandwidth-bound; the practical ceiling on
+  this hardware is 4K. Which ladders YouTube offers also depends on
+  yt-dlp's =player_client= — expect that to shift when Google does.
+- mpv config: =hwdec=auto-safe=. Embedded playback goes through the render
+  API, whose only backends are OpenGL and SW (=render.h=, 0.41) — the vo is
+  effectively =libmpv=; =vo=gpu-next= / =gpu-api=vulkan= do NOT apply to
+  the embedded path. Qt must be pinned to the OpenGL RHI backend
+  (=QQuickWindow.setGraphicsApi(OpenGL)=) or =QQuickFramebufferObject=
+  breaks; vaapi interop rides EGL on Wayland. HDR
+  (=target-colorspace-hint=) is *unverified* on Hyprland — test before
+  listing it as a feature.
+
+* Environment
+
+- NixOS flake in this directory; =nix develop= gives PySide6, python-mpv,
+  yt-dlp (as binary + PO token plugin, consumed by mpv's ytdl_hook — the
+  Python library import is no longer part of the design), gpsoauth,
+  keyring, httpx, libmpv headers + qtdeclarative (for the C++ bridge),
+  nodejs (PO token provider), vainfo.
+- Flake debts: none. =python-mpv= dropped, =qasync= + =h2= added
+  2026-08-10 (qasync builds with its flaky GC tests skipped);
+  QtWebEngine ships inside nixpkgs' pyside6 — only its QML plugin path
+  needed adding to =QML_IMPORT_PATH= alongside qtdeclarative's.
+- =keyring= needs a running Secret Service daemon (gnome-keyring);
+  Hyprland does not provide one by itself. =check.sh= must assert it.
+- =./check.sh= is the runnable environment check (AV1/VP9 hw decode,
+  Python imports, libmpv headers, Wayland). Run it after any flake or
+  system change.
+- System-level VA-API comes from =nixos-config= —
+  =hardware.graphics.extraPackages = [ intel-media-driver ]= in
+  =modules/hardware/hardware.nix= (activated 2026-08-10). The
+  =LIBVA_DRIVERS_PATH= in this flake's devShell is now redundant but
+  harmless: same driver.
+
+* Known debts and risks
+
+- PO token provider: INTEGRATED 2026-08-10. nixpkgs'
+  =bgutil-ytdlp-pot-provider= python package ships both the yt-dlp plugin
+  (auto-discovered: it shares the env with yt-dlp's binary) and the built
+  Node server (=share/.../build/main.js=). =main.py= starts the server on
+  launch (skipped if port 4416 is already serving) and terminates it on
+  quit; =check.sh= asserts plugin + node + main.js. Verified: yt-dlp
+  reports =bgutil:http= as an active provider and generates gvs PO tokens
+  through it. Still open for release: the bundle-vs-require packaging
+  story (a "native" app shipping Node remains ugly).
+- SABR/UMP: YouTube is moving stream delivery to a server-driven binary
+  protocol; yt-dlp's SABR downloader was still in test mid-2026. This is
+  yt-dlp's problem by design, but expect playback breakage windows.
+- gpsoauth is reverse-engineered; Google can break the flow. Aurora Store
+  breakage is the canary — if Aurora falls, we fall.
+- ToS: this client violates YouTube ToS like every client in this space
+  (youtube-dl DMCA 2020, Invidious C&D 2024, NewPipe never in Play Store).
+  Distribution via a store should assume takedown risk.
+- InnerTube =browse= responses are undocumented and shape-shift; parsing
+  must be defensive and versioned.
+- Logged-out home feed content is undecided: anonymous trending, or
+  NewPipe-style local subscriptions (anonymous per-channel fetch). Search
+  and related videos already work anonymously; only "home" needs a story.
+
+* Status / next steps
+
+Closed: platform (Wayland-only, Hyprland), rendering path (render API =
+OpenGL only, Qt pinned to GL), language split, login mechanism (gpsoauth
+via login-only webview), data model (queue per tab, sqlite as source of
+truth, browse global outside tabs), extraction (mpv ytdl_hook, not
+library), format policy, dev environment. All hardware and environment
+checks pass as of 2026-08-10.
+
+=mpv_handle= ownership decided: C++. The bridge creates and owns the
+handle and is the only code that links libmpv (see Rendering). Python
+drives mpv through the bridge's invokables/signals; python-mpv leaves
+the flake.
+
+1. DONE (2026-08-10). C++ =QQuickFramebufferObject= bridge in =bridge/=
+   (=MpvObject=, QML module =MpvBridge=, cmake in-flake); =main.py= +
+   =qml/Main.qml= play a hardcoded URL with "Using hardware decoding
+   (vaapi)" confirmed (AV1 4K60). =QVariant= <-> =mpv_node= conversion is
+   unit-tested (=bridge/test_node_conv.cpp=, roundtrip). python-mpv is out
+   of the flake. Gotchas encoded in the bridge: =LC_NUMERIC=C= before
+   =mpv_create= (Qt sets the system locale), QML JS arrays arrive as
+   wrapped =QJSValue= and are unwrapped before node conversion, libmpv
+   defaults =ytdl= off.
+2. DONE (2026-08-10). Feed grid + thumbnail pipeline in =app/=: anonymous
+   InnerTube search (defensive parser, video-id shape validated -- it
+   becomes a cache filename), one =httpx.AsyncClient= (HTTP/2) on qasync,
+   semaphore-8 thumb fetches into a disk LRU, sqlite =feed_cache= painted
+   before any network on cold start. Grid follows the performance rules
+   (fixed cells, async Image at display size, roles-only delegates; thumb
+   requests ride delegate instantiation, so visible+cacheBuffer only).
+   Parser, LRU eviction and store are checked in =app/test_feed.py=.
+   Verified live: search returned 20 videos, 20 thumbs cached, cold start
+   painted from sqlite. Feed source is search; the "home" question stays
+   open. Skipped as YAGNI: search continuation/pagination.
+3. DONE (2026-08-10). Tabs in =app/tabstore.py= (tables =tabs=,
+   =queue_items=, =meta.active_tab=; FK cascade) + =app/tabmanager.py=
+   (strip model, pure =materialize()=: current item =loadfile replace=
+   with =start= as per-item option via the =-1= index slot, upcoming items
+   append; earlier items live only in sqlite and =playlist-pos= maps back
+   through the materialize offset). playback-time updates memory only;
+   sqlite writes on switch/close/quit + a 10s heartbeat. No autoplay on
+   startup: restored tabs materialize on first click. Tap = fresh queue in
+   active tab; right-click = background tab. Esc returns to browse, tab
+   keeps playing. Checked in =app/test_tabs.py=; verified live: position
+   27.15s persisted across restart, =--resume= continued to 42.2s.
+   Dev harness flags in =main.py=: =--play <id>=, =--resume=.
+4. DONE (2026-08-10), login verified with a real account. =app/auth.py=: AuthManager
+   (gpsoauth injected for tests) — email entered in-app, EmbeddedSetup in
+   an off-the-record QtWebEngine profile (MinuteMaid mobile UA; google
+   session cookies never touch disk), =oauth_token= cookie intercepted →
+   =exchange_token= → master token to keyring only; Bearer minted on
+   demand, cached to expiry, never persisted. =qml/LoginView.qml= is the
+   ONE QtWebEngine site, behind an on-demand Loader; without QtWebEngine
+   the app runs logged out. Subscriptions: InnerTube ANDROID =browse
+   FEsubscriptions= with defensive =videoWithContextRenderer= parser into
+   the same feed grid. Checked in =app/test_auth.py=. Verified end-to-end
+   2026-08-10: EmbeddedSetup login → master token in keyring → bearer
+   minted → subscriptions 200 (parsed 0: fresh account, feed genuinely
+   empty server-side — the "New videos right to you" promo shelf is the
+   official empty state). Gotcha: a stale ANDROID =clientVersion= gets
+   400 =FAILED_PRECONDITION= — bump it in =innertube.py=; no API key
+   needed. gnome-keyring enabled in nixos-config (greetd PAM unlock);
+   check.sh asserts the Secret Service daemon. Dev flag: =--login=.
+5. DONE (2026-08-10). Enqueue = queue append + =loadfile append=; play
+   next = insert after current + =loadfile insert-next= (0.38+ flag beats
+   append+playlist-move). sqlite always updates; mpv only when the tab owns
+   the playlist (restored tabs sync on first activation). Watch later:
+   InnerTube =browse/edit_playlist= ACTION_ADD_VIDEO to =WL= and =browse
+   VLWL= read, parsed by a recursive renderer walker (containers
+   shape-shift; renderers don't). Both verified live against the real
+   account: add returned STATUS_SUCCEEDED, fetch parsed the added video.
+   Context menu: enqueue / play next / watch later; WL view reuses the
+   grid. Skipped as YAGNI: WL remove (needs setVideoId bookkeeping),
+   queue reorder UI.
+6. DONE (2026-08-10). Measured on surface (i7-1185G7, Hyprland), same
+   video =rZHrffKAc6k= (native max 1080p60; we picked AV1 hw, Chromium its
+   default), 50 one-second samples during steady visible playback, via
+   =tools/measure.py= (process-tree CPU + summed PSS — PSS, not RSS, so
+   Chromium's shared pages aren't over-counted):
+   |                    | mono_player  | Chromium 151 (stock, fullscreen) |
+   |--------------------+--------------+----------------------------------|
+   | CPU avg (one core) | 8% (p95 9%)  | 18% (p95 42%)                    |
+   | PSS avg / peak     | 476 / 498 MB | 819 / 924 MB                     |
+   ~2.2x less CPU (4.7x at p95 — no JS/GC spikes), ~1.7x less memory.
+   Time to first frame: 2.8s from loadfile (includes ytdl_hook
+   extraction; the =tabs: first frame= log line is the permanent probe).
+   Frame time: QSG timing logging proved sporadic, but every sampled
+   frame rendered in <1ms (the FBO blit; compositing is Hyprland's job).
+   Chromium ran as installed — no VAAPI flags — which is the honest
+   comparison: that IS Chrome-on-Linux as people run it.
