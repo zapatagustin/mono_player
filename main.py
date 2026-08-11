@@ -2,6 +2,7 @@
 httpx's asyncio loop riding Qt's via qasync."""
 
 import asyncio
+import os
 import shutil
 import socket
 import subprocess
@@ -139,6 +140,12 @@ def main() -> int:
     if pot is not None:
         app.aboutToQuit.connect(pot.terminate)
 
+    # Dev knob: clean-quit after N seconds (exercises the real teardown
+    # path, which SIGTERM'd test runs skip).
+    quit_after = os.environ.get("MONO_QUIT_AFTER")
+    if quit_after:
+        QTimer.singleShot(int(float(quit_after) * 1000), app.quit)
+
     # Session restore: reopen where the app was closed — the active tab
     # resumes at its persisted position (browser-style). Behind it, the
     # browse view refreshes to the personalized home (cached feed paints
@@ -186,6 +193,10 @@ def main() -> int:
     app.aboutToQuit.connect(close_event.set)
     with loop:
         loop.run_until_complete(close_event.wait())
+    # Destroy the engine before the context objects (feed/tabs/theme/...)
+    # go out of scope: live QML bindings otherwise re-evaluate against
+    # dead context properties and spam TypeErrors on every exit.
+    del engine
     return 0
 
 
