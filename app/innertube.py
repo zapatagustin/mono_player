@@ -26,6 +26,7 @@ class Video:
     channel: str
     duration: str
     thumb_url: str
+    channel_id: str = ""
 
 
 def _walk(node, *path):
@@ -63,6 +64,7 @@ def _parse_video(item) -> Video | None:
         channel if isinstance(channel, str) else "",
         duration if isinstance(duration, str) else "",
         thumb if isinstance(thumb, str) else "",
+        _channel_id(vr.get("ownerText")),
     )
 
 
@@ -116,6 +118,13 @@ def _text(node) -> str | None:
     return text if isinstance(text, str) else None
 
 
+def _channel_id(text_node) -> str:
+    """browseId living on a text's first run (owner/byline links)."""
+    bid = _walk(text_node, "runs", 0, "navigationEndpoint",
+                "browseEndpoint", "browseId")
+    return bid if isinstance(bid, str) else ""
+
+
 def _parse_video_with_context(item) -> Video | None:
     vr = _walk(item, "videoWithContextRenderer")
     if not isinstance(vr, dict):
@@ -133,6 +142,7 @@ def _parse_video_with_context(item) -> Video | None:
         _text(vr.get("shortBylineText")) or "",
         _text(vr.get("lengthText")) or "",
         thumb if isinstance(thumb, str) else "",
+        _channel_id(vr.get("shortBylineText")),
     )
 
 
@@ -162,6 +172,7 @@ def _parse_playlist_video(vr) -> Video | None:
         _text(vr.get("shortBylineText")) or "",
         _text(vr.get("lengthText")) or "",
         thumb if isinstance(thumb, str) else "",
+        _channel_id(vr.get("shortBylineText")),
     )
 
 
@@ -214,6 +225,131 @@ async def add_to_watch_later(client, bearer: str, video_id: str) -> bool:
     )
     resp.raise_for_status()
     return resp.json().get("status") == "STATUS_SUCCEEDED"
+
+
+NEXT_URL = "https://www.youtube.com/youtubei/v1/next"
+
+# `next` related videos only exist in parseable form on the WEB client
+# (ANDROID serves them as opaque elementRenderer protobufs).
+WEB_CONTEXT = {
+    "client": {
+        "clientName": "WEB",
+        "clientVersion": "2.20260101.00.00",
+        "hl": "en",
+        "gl": "US",
+    }
+}
+
+_NEXT_RENDERERS = frozenset({
+    "compactVideoRenderer", "videoWithContextRenderer", "videoRenderer",
+    "lockupViewModel", "videoOwnerRenderer", "slimOwnerRenderer",
+})
+
+_TIME = re.compile(r"[\d:]+")
+
+
+def _parse_lockup(vm) -> Video | None:
+    """2024+ WEB view-model shape for list items."""
+    if vm.get("contentType") != "LOCKUP_CONTENT_TYPE_VIDEO":
+        return None
+    vid = vm.get("contentId")
+    title = _walk(vm, "metadata", "lockupMetadataViewModel", "title", "content")
+    if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) \
+            or not isinstance(title, str):
+        return None
+    channel = _walk(vm, "metadata", "lockupMetadataViewModel", "metadata",
+                    "contentMetadataViewModel", "metadataRows", 0,
+                    "metadataParts", 0, "text", "content")
+    duration = ""
+    for _, badge in _find_renderers(vm.get("contentImage"),
+                                    frozenset({"thumbnailBadgeViewModel"})):
+        text = badge.get("text")
+        if isinstance(text, str) and _TIME.fullmatch(text):
+            duration = text
+            break
+    thumb = _walk(vm, "contentImage", "thumbnailViewModel", "image",
+                  "sources", -1, "url")
+    return Video(
+        vid,
+        title,
+        channel if isinstance(channel, str) else "",
+        duration,
+        thumb if isinstance(thumb, str) else "",
+    )
+
+
+def _parse_compact_video(vr) -> Video | None:
+    vid = vr.get("videoId")
+    title = _text(vr.get("title"))
+    if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) or title is None:
+        return None
+    thumb = _walk(vr, "thumbnail", "thumbnails", -1, "url")
+    return Video(
+        vid,
+        title,
+        _text(vr.get("shortBylineText")) or "",
+        _text(vr.get("lengthText")) or "",
+        thumb if isinstance(thumb, str) else "",
+        _channel_id(vr.get("shortBylineText")),
+    )
+
+
+def parse_next(data) -> tuple[str, str, list[Video]]:
+    """(owner channel id, owner name, related videos) from a `next`
+    response. Everything degrades to empty on shape mismatch."""
+    owner_id, owner_name = "", ""
+    related_videos = []
+    for name, node in _find_renderers(data, _NEXT_RENDERERS):
+        if name in ("videoOwnerRenderer", "slimOwnerRenderer"):
+            if not owner_id:
+                bid = _walk(node, "navigationEndpoint", "browseEndpoint",
+                            "browseId")
+                if not isinstance(bid, str) or not bid:
+                    bid = _channel_id(node.get("title"))
+                owner_id = bid or ""
+                owner_name = _text(node.get("title")) or ""
+            continue
+        if name == "compactVideoRenderer":
+            video = _parse_compact_video(node)
+        elif name == "lockupViewModel":
+            video = _parse_lockup(node)
+        elif name == "videoRenderer":
+            video = _parse_video({name: node})
+        else:
+            video = _parse_video_with_context({name: node})
+        if video is not None:
+            related_videos.append(video)
+    return owner_id, owner_name, related_videos
+
+
+async def related(client, video_id: str) -> tuple[str, str, list[Video]]:
+    """Anonymous `next`: the current video's channel + related videos."""
+    resp = await client.post(
+        NEXT_URL,
+        json={"context": WEB_CONTEXT, "videoId": video_id},
+        headers={"content-type": "application/json"},
+    )
+    resp.raise_for_status()
+    owner_id, owner_name, videos = parse_next(resp.json())
+    return owner_id, owner_name, [v for v in videos if v.video_id != video_id]
+
+
+# Stable protobuf param selecting a channel's Videos tab.
+CHANNEL_VIDEOS_PARAMS = "EgZ2aWRlb3PyBgQKAjoA"
+
+
+async def channel_videos(client, browse_id: str) -> list[Video]:
+    """Anonymous channel browse (Videos tab; the defensive walker still
+    finds videos if the params stop selecting the tab)."""
+    resp = await client.post(
+        BROWSE_URL,
+        json={"context": WEB_CONTEXT, "browseId": browse_id,
+              "params": CHANNEL_VIDEOS_PARAMS},
+        headers={"content-type": "application/json"},
+    )
+    resp.raise_for_status()
+    _, _, videos = parse_next(resp.json())
+    return videos
 
 
 def parse_subscriptions(data) -> list[Video]:

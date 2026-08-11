@@ -5,7 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from innertube import Video, parse_playlist, parse_search
+from innertube import Video, parse_next, parse_playlist, parse_search
 from thumbs import ThumbCache
 from feedstore import FeedStore
 
@@ -77,7 +77,102 @@ def test_parser():
     assert parse_search({"contents": "nope"}) == []
     assert parse_search(search_response("nope")) == []
     assert parse_search(search_response([{"videoRenderer": "nope"}])) == []
+
+    # Channel id is extracted when the owner carries a browseEndpoint.
+    item = video_renderer("dQw4w9WgXcQ", "One")
+    item["videoRenderer"]["ownerText"]["runs"][0]["navigationEndpoint"] = {
+        "browseEndpoint": {"browseId": "UCabc123"}
+    }
+    assert parse_search(search_response([item]))[0].channel_id == "UCabc123"
     print("parser: ok")
+
+
+def test_next_parser():
+    def compact(vid, title, channel_id=""):
+        r = {
+            "compactVideoRenderer": {
+                "videoId": vid,
+                "title": {"simpleText": title},
+                "shortBylineText": {"runs": [{"text": "chan"}]},
+                "lengthText": {"simpleText": "3:21"},
+                "thumbnail": {"thumbnails": [{"url": "https://t/r.jpg"}]},
+            }
+        }
+        if channel_id:
+            r["compactVideoRenderer"]["shortBylineText"]["runs"][0][
+                "navigationEndpoint"] = {"browseEndpoint": {"browseId": channel_id}}
+        return r
+
+    data = {
+        "contents": {"anything": [
+            {"videoOwnerRenderer": {
+                "title": {"runs": [{"text": "Current Channel"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "UCowner1"}},
+            }},
+            compact("dQw4w9WgXcQ", "Rel One", "UCrel1"),
+            compact("aqz-KE-bpKQ", "Rel Two"),
+        ]}
+    }
+    owner_id, owner_name, related = parse_next(data)
+    assert (owner_id, owner_name) == ("UCowner1", "Current Channel")
+    assert related == [
+        Video("dQw4w9WgXcQ", "Rel One", "chan", "3:21", "https://t/r.jpg", "UCrel1"),
+        Video("aqz-KE-bpKQ", "Rel Two", "chan", "3:21", "https://t/r.jpg"),
+    ]
+
+    # ANDROID-style videoWithContextRenderer is accepted too; the current
+    # video (same id as requested) can be filtered by the caller.
+    data2 = {"x": [
+        {"videoWithContextRenderer": {
+            "videoId": "aqz-KE-bpKQ",
+            "headline": {"runs": [{"text": "V"}]},
+        }},
+    ]}
+    owner_id, owner_name, related = parse_next(data2)
+    assert (owner_id, owner_name) == ("", "")
+    assert [v.video_id for v in related] == ["aqz-KE-bpKQ"]
+
+    # Modern WEB shape: lockupViewModel (title/channel under viewmodels,
+    # duration as a thumbnail badge). Non-video lockups are skipped.
+    def lockup(vid, title, ctype="LOCKUP_CONTENT_TYPE_VIDEO"):
+        return {"lockupViewModel": {
+            "contentId": vid,
+            "contentType": ctype,
+            "metadata": {"lockupMetadataViewModel": {
+                "title": {"content": title},
+                "metadata": {"contentMetadataViewModel": {"metadataRows": [
+                    {"metadataParts": [{"text": {"content": "LockChan"}}]}
+                ]}},
+            }},
+            "contentImage": {"thumbnailViewModel": {
+                "image": {"sources": [{"url": "https://t/l.jpg"}]},
+                "overlays": [{"thumbnailOverlayBadgeViewModel": {
+                    "thumbnailBadges": [{"thumbnailBadgeViewModel": {
+                        "text": "31:25"}}]}}],
+            }},
+        }}
+
+    data3 = {"contents": [
+        lockup("dQw4w9WgXcQ", "Lock One"),
+        lockup("aqz-KE-bpKQ", "A Playlist", ctype="LOCKUP_CONTENT_TYPE_PLAYLIST"),
+    ]}
+    _, _, related = parse_next(data3)
+    assert related == [
+        Video("dQw4w9WgXcQ", "Lock One", "LockChan", "31:25", "https://t/l.jpg"),
+    ]
+
+    # Owner id can live on the title runs instead of a top-level endpoint.
+    data4 = {"x": {"videoOwnerRenderer": {
+        "title": {"runs": [{"text": "RunsOwner", "navigationEndpoint": {
+            "browseEndpoint": {"browseId": "UCruns"}}}]},
+    }}}
+    owner_id, owner_name, _ = parse_next(data4)
+    assert (owner_id, owner_name) == ("UCruns", "RunsOwner")
+
+    # Garbage degrades.
+    assert parse_next({}) == ("", "", [])
+    assert parse_next(None) == ("", "", [])
+    print("next parser: ok")
 
 
 def test_playlist_parser():
@@ -172,6 +267,7 @@ def test_feed_store():
 
 if __name__ == "__main__":
     test_parser()
+    test_next_parser()
     test_playlist_parser()
     test_thumb_cache()
     test_feed_store()

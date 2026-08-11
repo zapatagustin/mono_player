@@ -29,6 +29,7 @@ from theme import Theme  # noqa: E402
 from feedmodel import FeedModel  # noqa: E402
 from feedstore import FeedStore  # noqa: E402
 from net import make_client  # noqa: E402
+from related import RelatedModel  # noqa: E402
 from tabmanager import TabManager  # noqa: E402
 from tabstore import TabStore  # noqa: E402
 from thumbs import ThumbCache  # noqa: E402
@@ -90,11 +91,16 @@ def main() -> int:
     )
     tab_store = TabStore(data_dir / "mono.db")
     auth = AuthManager(tab_store)
+    client = make_client()
     feed = FeedModel(
-        make_client(), FeedStore(data_dir / "mono.db"),
+        client, FeedStore(data_dir / "mono.db"),
         ThumbCache(cache_dir / "thumbs"), auth=auth,
     )
     tabs = TabManager(tab_store, url_cache=StreamUrlCache())
+    related = RelatedModel(client)
+    # Prefetch related whenever the active video changes — the panel and
+    # the channel jump (gc) are then instant.
+    tabs.currentVideoChanged.connect(related.load)
 
     login_profile = None
     if WEBENGINE:
@@ -111,6 +117,7 @@ def main() -> int:
     engine.rootContext().setContextProperty("tabs", tabs)
     engine.rootContext().setContextProperty("auth", auth)
     engine.rootContext().setContextProperty("th", theme)
+    engine.rootContext().setContextProperty("related", related)
     engine.rootContext().setContextProperty("authAvailable", WEBENGINE)
     engine.rootContext().setContextProperty("loginProfile", login_profile)
     engine.load(str(ROOT / "qml" / "Main.qml"))

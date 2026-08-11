@@ -63,6 +63,19 @@ Window {
                 if (auth.loggedIn) { auth.logout(); root.notify("signed out") }
                 else { root.promptKind = "login"; root.prompting = true }
                 return true
+            case Qt.Key_C: {
+                const cid = root.watching ? related.channelId
+                    : (grid.currentItem ? grid.currentItem.channelId : "")
+                if (cid !== "") {
+                    feed.loadChannel(cid)
+                    root.notify("channel: " + (root.watching
+                        ? related.channelName : grid.currentItem.channel))
+                    root.watching = false
+                } else {
+                    root.notify("channel unknown")
+                }
+                return true
+            }
             }
             return true  // unknown g-sequence: swallow, reset
         }
@@ -249,6 +262,7 @@ Window {
                         required property string channel
                         required property string duration
                         required property string thumb
+                        required property string channelId
 
                         width: grid.cellWidth
                         height: grid.cellHeight
@@ -356,6 +370,7 @@ Window {
 
                 property int activeTabId: -1
                 property var activePlayer: null
+                property string panelMode: ""  // "" | "related"
 
                 function refreshActivePlayer() {
                     for (let i = 0; i < playersRepeater.count; i++) {
@@ -398,6 +413,12 @@ Window {
                         playerView.activeTabId = tabId
                     }
                 }
+
+                Item {
+                    id: poolArea
+                    anchors.fill: parent
+                    // The video shrinks when a side panel is open.
+                    anchors.rightMargin: playerView.panelMode !== "" ? 380 : 0
 
                 Repeater {
                     id: playersRepeater
@@ -534,14 +555,139 @@ Window {
                     }
                 }
 
+                }  // poolArea
+
+                // Related panel: text-only list, TUI style.
+                Rectangle {
+                    id: sidePanel
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: 380
+                    visible: playerView.panelMode !== ""
+                    color: th.bg
+                    border.color: th.bg2
+                    border.width: 1
+
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 1
+
+                        Rectangle {
+                            width: parent.width
+                            height: th.barHeight
+                            color: th.bg1
+                            Text {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8
+                                verticalAlignment: Text.AlignVCenter
+                                text: related.loading ? "related — loading…"
+                                    : "related" + (related.channelName !== ""
+                                        ? " — " + related.channelName : "")
+                                color: th.fg
+                                font.pixelSize: th.fontSizeSmall
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        ListView {
+                            id: relList
+                            width: parent.width
+                            height: parent.height - th.barHeight
+                            clip: true
+                            model: related.items
+                            currentIndex: 0
+
+                            delegate: Rectangle {
+                                id: relCell
+                                required property var modelData
+                                required property int index
+                                readonly property bool sel:
+                                    ListView.isCurrentItem
+                                width: relList.width
+                                height: 52
+                                color: sel ? th.accent : "transparent"
+
+                                Column {
+                                    anchors.fill: parent
+                                    anchors.margins: 6
+                                    spacing: 2
+                                    Text {
+                                        width: parent.width
+                                        text: relCell.modelData.title
+                                        color: relCell.sel ? th.accentFg : th.fg
+                                        font.pixelSize: th.fontSizeSmall
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 2
+                                        wrapMode: Text.WordWrap
+                                    }
+                                    Text {
+                                        width: parent.width
+                                        text: relCell.modelData.channel
+                                              + (relCell.modelData.duration
+                                                 ? " · " + relCell.modelData.duration : "")
+                                        color: relCell.sel ? th.accentFg : th.fgDim
+                                        font.pixelSize: th.fontSizeSmall
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                TapHandler {
+                                    onTapped: {
+                                        relList.currentIndex = index
+                                        tabs.playVideo(modelData.videoId,
+                                                       modelData.title)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Keys.onPressed: (event) => {
                     if (root.gKey(event) || root.tabKey(event)) {
                         event.accepted = true
                         return
                     }
+                    // Panel navigation captures j/k/enter while open.
+                    if (playerView.panelMode !== "") {
+                        const items = related.items
+                        const it = relList.currentIndex >= 0
+                            && relList.currentIndex < items.length
+                            ? items[relList.currentIndex] : null
+                        switch (event.key) {
+                        case Qt.Key_J: case Qt.Key_Down:
+                            relList.currentIndex = Math.min(
+                                items.length - 1, relList.currentIndex + 1)
+                            event.accepted = true; return
+                        case Qt.Key_K: case Qt.Key_Up:
+                            relList.currentIndex = Math.max(
+                                0, relList.currentIndex - 1)
+                            event.accepted = true; return
+                        case Qt.Key_Return: case Qt.Key_Enter:
+                            if (it) tabs.playVideo(it.videoId, it.title)
+                            event.accepted = true; return
+                        case Qt.Key_T:
+                            if (it) { tabs.openInNewTab(it.videoId, it.title)
+                                      root.notify("opened in new tab") }
+                            event.accepted = true; return
+                        case Qt.Key_A:
+                            if (it) { tabs.enqueue(it.videoId, it.title)
+                                      root.notify("queued") }
+                            event.accepted = true; return
+                        case Qt.Key_P:
+                            if (it) { tabs.playNext(it.videoId, it.title)
+                                      root.notify("playing next") }
+                            event.accepted = true; return
+                        case Qt.Key_R: case Qt.Key_Escape:
+                            playerView.panelMode = ""
+                            event.accepted = true; return
+                        }
+                    }
                     const ap = playerView.activePlayer
                     if (!ap) return
                     switch (event.key) {
+                    case Qt.Key_R:
+                        playerView.panelMode = "related"; break
                     case Qt.Key_Space: ap.togglePause(); break
                     case Qt.Key_H: case Qt.Key_Left:
                         ap.cmd(["seek", -5]); break
@@ -607,8 +753,8 @@ Window {
                         : root.watching && statusline.ap && statusline.ap.loading
                         ? "loading…"
                         : root.watching
-                        ? "space pause · h/l seek · j/k vol · s subs · m mute · f full · gt/1-9 tab · x close · esc back"
-                        : "hjkl move · enter play · t tab · a queue · p next · w later · / search · gt/1-9 tab · gs subs · gw later · gl login · q quit"
+                        ? "space pause · h/l seek · j/k vol · r related · gc channel · s subs · m mute · f full · gt/1-9 tab · x close · esc back"
+                        : "hjkl move · enter play · t tab · a queue · p next · w later · gc channel · / search · gt/1-9 tab · gs subs · gw later · gl login · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim

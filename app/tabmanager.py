@@ -61,6 +61,7 @@ class TabManager(QAbstractListModel):
     mpvCommandFor = Signal(int, "QVariant")
     videoStarted = Signal()
     activeIndexChanged = Signal()
+    currentVideoChanged = Signal(str)  # active tab's current video id
 
     def __init__(self, store: TabStore, materialize_delay_ms: int = 50,
                  url_cache=None, now_fn=time.time, live_cap: int = LIVE_CAP,
@@ -146,8 +147,17 @@ class TabManager(QAbstractListModel):
             self._live[tab.id].last_active = self._now()
             self.setActivePlayer.emit(tab.id)
             self.videoStarted.emit()
+            self._emit_current_video()
         else:
             self._materialize_active()
+
+    def _emit_current_video(self):
+        if self._active < 0:
+            return
+        tab = self._tabs[self._active]
+        if tab.queue:
+            idx = min(max(0, tab.queue_idx), len(tab.queue) - 1)
+            self.currentVideoChanged.emit(tab.queue[idx].video_id)
 
     @Slot(int)
     def closeTab(self, row: int):
@@ -206,6 +216,8 @@ class TabManager(QAbstractListModel):
         if idx != tab.queue_idx:
             self._update_tab(row, Tab(tab.id, tab.queue, idx, 0.0))
             self._store.save_state(tab.id, idx, 0.0)
+            if row == self._active:
+                self._emit_current_video()
 
     @Slot(int, str)
     def resolvedUrl(self, tab_id: int, resolved: str):
@@ -259,6 +271,7 @@ class TabManager(QAbstractListModel):
         cmds = materialize(tab, resolve)
         self.setActivePlayer.emit(tab.id)
         self.videoStarted.emit()
+        self._emit_current_video()
         if not cmds:
             return
         # Stop first and drain before loading into a reused player.

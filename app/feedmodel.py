@@ -11,8 +11,8 @@ from feedstore import FeedStore
 from innertube import Video
 from thumbs import ThumbCache
 
-VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB = range(
-    Qt.ItemDataRole.UserRole + 1, Qt.ItemDataRole.UserRole + 6
+VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB, CHANNEL_ID = range(
+    Qt.ItemDataRole.UserRole + 1, Qt.ItemDataRole.UserRole + 7
 )
 
 
@@ -43,6 +43,7 @@ class FeedModel(QAbstractListModel):
             CHANNEL: b"channel",
             DURATION: b"duration",
             THUMB: b"thumb",
+            CHANNEL_ID: b"channelId",
         }
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -59,6 +60,8 @@ class FeedModel(QAbstractListModel):
             return v.duration
         if role == THUMB:
             return self._thumbs.get(v.video_id, "")
+        if role == CHANNEL_ID:
+            return v.channel_id
         return None
 
     # --- invokables ---
@@ -87,6 +90,20 @@ class FeedModel(QAbstractListModel):
     def loadSubscriptions(self):
         if self._auth is not None:
             asyncio.create_task(self._load_subscriptions())
+
+    @Slot(str)
+    def loadChannel(self, browse_id: str):
+        if browse_id:
+            asyncio.create_task(self._load_channel(browse_id))
+
+    async def _load_channel(self, browse_id: str):
+        try:
+            videos = await innertube.channel_videos(self._client, browse_id)
+        except Exception as exc:
+            print(f"feed: channel failed: {exc!r}")
+            return
+        print(f"feed: {len(videos)} channel videos")
+        self._set_videos(videos)
 
     @Slot()
     def loadWatchLater(self):
