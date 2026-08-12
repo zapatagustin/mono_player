@@ -27,13 +27,26 @@ def payload(cid, author, text, likes="", replies="", published="1 day ago"):
     }}}
 
 
-def toolbar(cid, action):
-    key = quote(base64.b64encode(
+def _key(cid):
+    return quote(base64.b64encode(
         b"\x12\x1d" + cid.encode() + b"/12 F(").decode())
+
+
+def toolbar(cid, action, unlike=""):
     return {"payload": {"engagementToolbarSurfaceEntityPayload": {
-        "key": key,
+        "key": _key(cid),
         "likeCommand": {"innertubeCommand": {
             "performCommentActionEndpoint": {"action": action}}},
+        "unlikeCommand": {"innertubeCommand": {
+            "performCommentActionEndpoint": {"action": unlike}}},
+    }}}
+
+
+def toolbar_state(cid, liked):
+    return {"payload": {"engagementToolbarStateEntityPayload": {
+        "key": _key(cid),
+        "likeState": "TOOLBAR_LIKE_STATE_LIKED" if liked
+                     else "TOOLBAR_LIKE_STATE_INDIFFERENT",
     }}}
 
 
@@ -66,17 +79,20 @@ def test_parse_comments():
             payload("orphan", "@x", "not referenced by any thread"),
         ]}},
     }
-    data["frameworkUpdates"]["entityBatchUpdate"]["mutations"].append(
-        toolbar("UgxAliceAAAAAAAAAAAAAAA", "LIKE_ACTION_C1"))
+    data["frameworkUpdates"]["entityBatchUpdate"]["mutations"] += [
+        toolbar("UgxAliceAAAAAAAAAAAAAAA", "LIKE_ACTION_C1", "UNLIKE_C1"),
+        toolbar_state("UgxAliceAAAAAAAAAAAAAAA", liked=True),
+        toolbar_state("UgxEveBBBBBBBBBBBBBBBBB", liked=False),
+    ]
     comments, next_token = parse_comments(data)
     assert next_token == "PAGE2"
     assert comments == [
         Comment("@alice", "First", "5K", "1 day ago", "29",
                 "UgxAliceAAAAAAAAAAAAAAA", "REPLIES_C1",
-                "https://a/@alice.jpg", "LIKE_ACTION_C1"),
+                "https://a/@alice.jpg", "LIKE_ACTION_C1", "UNLIKE_C1", True),
         Comment("@eve", "Second", "", "1 day ago", "",
                 "UgxEveBBBBBBBBBBBBBBBBB", "",
-                "https://a/@eve.jpg", ""),
+                "https://a/@eve.jpg", "", "", False),
     ]
 
     # Replies page: no threads — payloads in document order, no next token.
@@ -124,9 +140,14 @@ def test_comments_model():
     calls = []
 
     async def fetch(client, video_id, bearer=None):
-        calls.append(video_id)
-        return ([Comment("@a", "hi", "1", "now", "2", "c1", "RTOK",
-                         "https://a/a.jpg", "LIKEACT")], "PAGE2")
+        calls.append((video_id, bearer))
+        if bearer:
+            # authenticated ANDROID: likes/avatars but NO reply tokens
+            return ([Comment("@a", "hi", "1", "now", "2", "c1", "",
+                             "https://a/a.jpg", "LIKEACT", "UNLIKEACT")],
+                    "PAGE2")
+        # anonymous WEB: reply tokens present
+        return ([Comment("@a", "hi", "1", "now", "2", "c1", "RTOK")], "")
 
     async def fetch_page(client, token, bearer=None):
         calls.append(token)
@@ -134,23 +155,31 @@ def test_comments_model():
             return ([Comment("@r", "a reply", "", "now", "", "r1", "")], "")
         return ([Comment("@b", "more", "", "now", "", "c2", "")], "")
 
-    m = CommentsModel(client=None, fetch_fn=fetch, page_fn=fetch_page,
-                      cache_size=2)
+    class FakeAuth:
+        async def bearer(self):
+            return "tok"
+
+    m = CommentsModel(client=None, auth=FakeAuth(), fetch_fn=fetch,
+                      page_fn=fetch_page, cache_size=2)
     m.setCurrent("aaaaaaaaaaa")
     asyncio.run(m._load())
-    assert calls == ["aaaaaaaaaaa"]
+    assert calls == [("aaaaaaaaaaa", "tok")]
     assert m.items[0]["author"] == "@a"
+    # hasReplies comes from the reply COUNT: the auth shape has no tokens.
     assert m.items[0]["hasReplies"] and not m.items[0]["expanded"]
+    assert m.items[0]["liked"] is False
     assert m.hasMore
 
     # Pagination appends and updates the token.
     asyncio.run(m._load_more())
-    assert calls == ["aaaaaaaaaaa", "PAGE2"]
+    assert calls[-1] == "PAGE2"
     assert [i["author"] for i in m.items] == ["@a", "@b"]
     assert not m.hasMore  # second page returned no token
 
-    # Reply expansion inserts depth-1 items right after the parent.
+    # Reply expansion with no token: the anonymous WEB listing is fetched
+    # once to map commentId -> reply token, then the replies load.
     asyncio.run(m._toggle(0))
+    assert ("aaaaaaaaaaa", None) in calls  # anonymous refetch happened
     assert calls[-1] == "RTOK"
     assert [(i["author"], i["depth"]) for i in m.items] == [
         ("@a", 0), ("@r", 1), ("@b", 0)]
@@ -176,16 +205,18 @@ def test_comments_model():
         acted.append(action)
         return True
 
-    class FakeAuth:
-        async def bearer(self):
-            return "tok"
-
-    m._auth = FakeAuth()
     m._action_fn = act
+    # Like toggles: first LIKEACT and liked=True, then UNLIKEACT and back.
     asyncio.run(m._like(0))
     assert acted == ["LIKEACT"]
     assert msgs[-1] == "comment liked"
-    asyncio.run(m._like(2))  # "@b" has no like action
+    assert m.items[0]["liked"] is True
+    asyncio.run(m._like(0))
+    assert acted == ["LIKEACT", "UNLIKEACT"]
+    assert msgs[-1] == "comment unliked"
+    assert m.items[0]["liked"] is False
+    idx = next(i for i, it in enumerate(m.items) if it["author"] == "@b")
+    asyncio.run(m._like(idx))  # "@b" has no like action
     assert msgs[-1] == "like unavailable (login?)"
 
     # Switching video clears items and pagination state.

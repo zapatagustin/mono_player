@@ -391,36 +391,56 @@ class Comment:
     comment_id: str = ""
     reply_token: str = ""  # continuation for this comment's replies
     avatar_url: str = ""
-    like_action: str = ""  # perform_comment_action param (auth fetches only)
+    like_action: str = ""  # perform_comment_action params (auth fetches only)
+    unlike_action: str = ""
+    liked: bool = False
 
 
 _COMMENT_ID_IN_KEY = re.compile(rb"(Ug[0-9A-Za-z_-]{10,})/")
 
 
-def _toolbar_like_actions(data) -> dict:
-    """commentId -> like action param, from the engagement toolbar surface
-    payloads (their entity key embeds the comment id). Auth fetches only —
-    anonymous toolbars carry a sign-in modal instead."""
+def _key_comment_id(key) -> str:
+    """Entity keys embed the comment id (base64, '<commentId>/...')."""
     import base64
     from urllib.parse import unquote
+    if not isinstance(key, str):
+        return ""
+    try:
+        decoded = base64.b64decode(unquote(key) + "===")
+    except Exception:
+        return ""
+    match = _COMMENT_ID_IN_KEY.search(decoded)
+    return match.group(1).decode() if match else ""
+
+
+def _toolbar_like_actions(data) -> dict:
+    """commentId -> (like, unlike) action params, from the engagement
+    toolbar surface payloads. Auth fetches only — anonymous toolbars carry
+    a sign-in modal instead."""
     actions = {}
     for _, tb in _find_renderers(
             data, frozenset({"engagementToolbarSurfaceEntityPayload"})):
-        key = tb.get("key")
-        if not isinstance(key, str):
+        cid = _key_comment_id(tb.get("key"))
+        if not cid:
             continue
-        try:
-            decoded = base64.b64decode(unquote(key) + "===")
-        except Exception:
-            continue
-        match = _COMMENT_ID_IN_KEY.search(decoded)
-        if not match:
-            continue
-        action = _walk(tb, "likeCommand", "innertubeCommand",
+        like = _walk(tb, "likeCommand", "innertubeCommand",
+                     "performCommentActionEndpoint", "action")
+        unlike = _walk(tb, "unlikeCommand", "innertubeCommand",
                        "performCommentActionEndpoint", "action")
-        if isinstance(action, str) and action:
-            actions[match.group(1).decode()] = action
+        if isinstance(like, str) and like:
+            actions[cid] = (like, unlike if isinstance(unlike, str) else "")
     return actions
+
+
+def _toolbar_like_states(data) -> dict:
+    """commentId -> liked bool, from the toolbar state payloads."""
+    states = {}
+    for _, st in _find_renderers(
+            data, frozenset({"engagementToolbarStateEntityPayload"})):
+        cid = _key_comment_id(st.get("key"))
+        if cid:
+            states[cid] = st.get("likeState") == "TOOLBAR_LIKE_STATE_LIKED"
+    return states
 
 
 def _parse_comment_payload(payload) -> Comment | None:
@@ -471,12 +491,14 @@ def parse_comments(data) -> tuple[list[Comment], str]:
                 by_id[comment.comment_id] = comment
 
     like_actions = _toolbar_like_actions(data)
+    like_states = _toolbar_like_states(data)
 
     def _with_extras(base: Comment, reply_token: str) -> Comment:
+        like, unlike = like_actions.get(base.comment_id, ("", ""))
         return Comment(base.author, base.text, base.likes, base.published,
                        base.replies, base.comment_id, reply_token,
-                       base.avatar_url,
-                       like_actions.get(base.comment_id, ""))
+                       base.avatar_url, like, unlike,
+                       like_states.get(base.comment_id, False))
 
     comments = []
     for _, thread in _find_renderers(data, frozenset({"commentThreadRenderer"})):

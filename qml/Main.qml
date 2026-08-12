@@ -782,18 +782,27 @@ Window {
                                         font.pixelSize: th.fontSizeSmall
                                         wrapMode: Text.Wrap
                                     }
-                                    Text {
-                                        text: (commCell.modelData.likes !== ""
-                                               ? commCell.modelData.likes + " likes" : "")
-                                              + (commCell.modelData.hasReplies
-                                                 ? "  ·  "
-                                                   + (commCell.modelData.expanded ? "▾" : "▸")
-                                                   + " " + commCell.modelData.replies
-                                                   + " replies (enter)" : "")
-                                        color: commCell.modelData.hasReplies
-                                            ? th.fgDim : th.emptyDim
-                                        font.pixelSize: th.fontSizeSmall
-                                        visible: text !== ""
+                                    Row {
+                                        spacing: 8
+                                        Text {
+                                            text: (commCell.modelData.liked ? "♥ " : "")
+                                                  + (commCell.modelData.likes !== ""
+                                                     ? commCell.modelData.likes + " likes"
+                                                     : (commCell.modelData.liked ? "liked" : ""))
+                                            color: commCell.modelData.liked
+                                                ? th.accent : th.emptyDim
+                                            font.pixelSize: th.fontSizeSmall
+                                            visible: text !== ""
+                                        }
+                                        Text {
+                                            text: (commCell.modelData.expanded ? "▾" : "▸")
+                                                  + " " + commCell.modelData.replies
+                                                  + " replies (enter)"
+                                            color: th.fgDim
+                                            font.pixelSize: th.fontSizeSmall
+                                            visible: commCell.modelData.hasReplies
+                                                     && commCell.modelData.depth === 0
+                                        }
                                     }
                                 }
                             }

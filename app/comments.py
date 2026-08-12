@@ -16,10 +16,14 @@ def _to_item(comment, depth: int) -> dict:
         "likes": comment.likes, "published": comment.published,
         "replies": comment.replies, "depth": depth,
         "replyToken": comment.reply_token,
-        "hasReplies": comment.reply_token != "",
         "expanded": False,
         "avatar": comment.avatar_url,
         "likeAction": comment.like_action,
+        "unlikeAction": comment.unlike_action,
+        "liked": comment.liked,
+        "id": comment.comment_id,
+        "hasReplies": comment.reply_token != "" or (
+            depth == 0 and comment.replies != ""),
     }
 
 
@@ -40,6 +44,7 @@ class CommentsModel(QObject):
         self._reply_cache: dict[str, list] = {}
         self._cache_size = cache_size
         self._video_id = ""
+        self._web_tokens_for: set[str] = set()
         self._items: list[dict] = []
         self._next_token = ""
         self._loading = False
@@ -74,7 +79,9 @@ class CommentsModel(QObject):
     async def _like(self, index: int):
         if not 0 <= index < len(self._items):
             return
-        action = self._items[index]["likeAction"]
+        item = self._items[index]
+        unliking = item["liked"] and item["unlikeAction"] != ""
+        action = item["unlikeAction"] if unliking else item["likeAction"]
         if not action:
             # anonymous fetches carry no action params
             self.message.emit("like unavailable (login?)")
@@ -85,7 +92,10 @@ class CommentsModel(QObject):
             return
         try:
             await self._action_fn(self._client, bearer, action)
-            self.message.emit("comment liked")
+            item["liked"] = not unliking
+            self.changed.emit()
+            self.message.emit("comment unliked" if unliking
+                              else "comment liked")
         except Exception as exc:
             print(f"comments: like failed: {exc!r}")
             self.message.emit("comment like failed")
@@ -135,8 +145,15 @@ class CommentsModel(QObject):
         if not 0 <= index < len(self._items):
             return
         item = self._items[index]
-        if item["depth"] != 0 or not item["replyToken"]:
+        if item["depth"] != 0 or not item["hasReplies"]:
             return
+        if not item["replyToken"]:
+            # Authenticated ANDROID listings carry no reply tokens; fetch
+            # the anonymous WEB listing once and map them by comment id.
+            await self._fill_reply_tokens()
+            if not item["replyToken"]:
+                self.message.emit("replies unavailable")
+                return
         if item["expanded"]:
             end = index + 1
             while end < len(self._items) and self._items[end]["depth"] == 1:
@@ -164,6 +181,29 @@ class CommentsModel(QObject):
         self._items[index + 1:index + 1] = [_to_item(c, 1) for c in replies]
         item["expanded"] = True
         self.changed.emit()
+
+    async def _fill_reply_tokens(self):
+        video_id = self._video_id
+        if video_id in self._web_tokens_for:
+            return  # already fetched for this video; unmatched stay empty
+        try:
+            web_comments, _ = await self._fetch(self._client, video_id, None)
+        except Exception as exc:
+            print(f"comments: web token fetch failed: {exc!r}")
+            return
+        if video_id != self._video_id:
+            return
+        self._web_tokens_for.add(video_id)
+        tokens = {c.comment_id: c.reply_token
+                  for c in web_comments if c.reply_token}
+        changed = False
+        for item in self._items:
+            token = tokens.get(item["id"], "")
+            if token and not item["replyToken"]:
+                item["replyToken"] = token
+                changed = True
+        if changed:
+            self.changed.emit()
 
     def _remember(self, video_id: str, comments, token: str):
         self._cache[video_id] = (comments, token)
