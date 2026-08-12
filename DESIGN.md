@@ -112,6 +112,7 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `m` | mute |
 | `s` | cycle subtitle track (statusline shows the language) |
 | `L` | like the current video |
+| `C` | write a comment (prompt; posts as the acting channel) |
 | `b` | save to playlist (panel picker; ✓ marks playlists that already have it) |
 | `r` / `c` | related / comments side panel (j/k navigate, enter acts) |
 | `f` | fullscreen |

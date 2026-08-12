@@ -4,7 +4,7 @@ load-more and reply expansion."""
 
 import asyncio
 
-from innertube import Comment, parse_comments
+from innertube import Comment, parse_comments, parse_create_comment_params
 from comments import CommentsModel
 
 
@@ -67,6 +67,18 @@ def test_parse_comments():
     print("comments parser: ok")
 
 
+def test_create_comment_params():
+    data = {"frameworkUpdates": {"entityBatchUpdate": {"mutations": [
+        {"payload": {"somethingElse": {}}},
+        {"payload": {"commentComposerControlsEntityPayload": {
+            "createCommentParams": "CREATE_PARAMS_TOKEN"}}},
+    ]}}}
+    assert parse_create_comment_params(data) == "CREATE_PARAMS_TOKEN"
+    assert parse_create_comment_params({}) == ""
+    assert parse_create_comment_params(None) == ""
+    print("create comment params: ok")
+
+
 def test_comments_model():
     calls = []
 
@@ -118,5 +130,6 @@ def test_comments_model():
 
 if __name__ == "__main__":
     test_parse_comments()
+    test_create_comment_params()
     test_comments_model()
     print("all checks passed")

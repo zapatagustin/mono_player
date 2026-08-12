@@ -147,6 +147,26 @@ class FeedModel(QAbstractListModel):
             print(f"feed: like failed: {exc!r}")
             self.message.emit("like failed")
 
+    @Slot(str, str)
+    def commentVideo(self, video_id: str, text: str):
+        text = text.strip()
+        if video_id and text and self._auth is not None:
+            asyncio.create_task(self._comment(video_id, text))
+
+    async def _comment(self, video_id: str, text: str):
+        bearer = await self._auth.bearer()
+        if bearer is None:
+            self.message.emit("login required (gl)")
+            return
+        try:
+            ok = await innertube.create_comment(
+                self._client, bearer, video_id, text)
+            self.message.emit("comment posted" if ok
+                              else "comments disabled on this video")
+        except Exception as exc:
+            print(f"feed: comment failed: {exc!r}")
+            self.message.emit("comment failed")
+
     @Slot(str)
     def subscribeChannel(self, browse_id: str):
         if browse_id and self._auth is not None:

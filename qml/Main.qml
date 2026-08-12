@@ -196,7 +196,8 @@ Window {
                 spacing: 8
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: root.promptKind === "login" ? "login:" : "/"
+                    text: root.promptKind === "login" ? "login:"
+                        : root.promptKind === "comment" ? "comment:" : "/"
                     color: th.accent
                     font.pixelSize: th.fontSize
                 }
@@ -211,8 +212,12 @@ Window {
                     placeholderTextColor: th.emptyDim
                     background: null
                     onAccepted: {
-                        if (root.promptKind === "login") auth.startLogin(text)
-                        else feed.search(text)
+                        if (root.promptKind === "login")
+                            auth.startLogin(text)
+                        else if (root.promptKind === "comment")
+                            feed.commentVideo(root.currentVideoId, text)
+                        else
+                            feed.search(text)
                         text = ""
                         root.prompting = false
                     }
@@ -938,6 +943,11 @@ Window {
                     case Qt.Key_R:
                         playerView.togglePanel("related"); break
                     case Qt.Key_C:
+                        if (event.modifiers & Qt.ShiftModifier) {
+                            root.promptKind = "comment"
+                            root.prompting = true
+                            break
+                        }
                         playerView.togglePanel("comments"); break
                     case Qt.Key_B:
                         playerView.togglePanel("playlist"); break
@@ -1055,7 +1065,7 @@ Window {
                         : root.watching && statusline.ap && statusline.ap.loading
                         ? "loading…"
                         : root.watching
-                        ? "space pause · h/l seek · j/k vol · r related · c comments · b playlist · L like · S subscribe · gc channel · m mute · f full · gt/1-9 tab · esc back"
+                        ? "space pause · h/l seek · j/k vol · r related · c comments · C comment · b playlist · L like · S subscribe · gc channel · m mute · f full · gt/1-9 tab · esc back"
                         : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)

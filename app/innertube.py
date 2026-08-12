@@ -695,6 +695,45 @@ async def like(client, bearer: str, video_id: str) -> bool:
     return True
 
 
+CREATE_COMMENT_URL = \
+    "https://www.youtube.com/youtubei/v1/comment/create_comment"
+
+
+def parse_create_comment_params(data) -> str:
+    """Per-video token authorizing comment creation; only present in
+    AUTHENTICATED next responses (commentComposerControlsEntityPayload)."""
+    for _, payload in _find_renderers(
+            data, frozenset({"commentComposerControlsEntityPayload"})):
+        params = payload.get("createCommentParams")
+        if isinstance(params, str) and params:
+            return params
+    return ""
+
+
+async def create_comment(client, bearer: str, video_id: str,
+                         text: str) -> bool:
+    """Post a top-level comment: authenticated next for the per-video
+    createCommentParams, then create_comment. Acts as the selected channel."""
+    resp = await client.post(
+        NEXT_URL,
+        json={"context": _account_context(), "videoId": video_id},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    params = parse_create_comment_params(resp.json())
+    if not params:
+        return False
+    resp = await client.post(
+        CREATE_COMMENT_URL,
+        json={"context": _account_context(),
+              "createCommentParams": params,
+              "commentText": text},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return True
+
+
 SUBSCRIBE_URL = "https://www.youtube.com/youtubei/v1/subscription/subscribe"
 
 
