@@ -5,9 +5,21 @@ next-page continuation and inline reply expansion."""
 import asyncio
 from collections import OrderedDict
 
-from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtCore import (
+    Property,
+    QAbstractListModel,
+    QModelIndex,
+    Qt,
+    Signal,
+    Slot,
+)
 
 import innertube
+
+_ROLE_KEYS = ("author", "text", "likes", "published", "replies", "depth",
+              "hasReplies", "expanded", "avatar", "liked")
+_ROLES = {Qt.ItemDataRole.UserRole + 1 + i: key
+          for i, key in enumerate(_ROLE_KEYS)}
 
 
 def _to_item(comment, depth: int) -> dict:
@@ -27,9 +39,12 @@ def _to_item(comment, depth: int) -> dict:
     }
 
 
-class CommentsModel(QObject):
-    changed = Signal()
+class CommentsModel(QAbstractListModel):
+    """Backing the panel ListView: mutations are GRANULAR (insert/remove/
+    dataChanged) — a wholesale reset would drop the view's scroll position.
+    Only a new video resets."""
 
+    changed = Signal()  # loading/hasMore status
     message = Signal(str)
 
     def __init__(self, client, auth=None, fetch_fn=None, page_fn=None,
@@ -49,6 +64,22 @@ class CommentsModel(QObject):
         self._next_token = ""
         self._loading = False
 
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._items)
+
+    def roleNames(self):
+        return {role: key.encode() for role, key in _ROLES.items()}
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self._items):
+            return None
+        key = _ROLES.get(role)
+        return self._items[index.row()].get(key) if key else None
+
+    def _row_changed(self, row: int):
+        idx = self.index(row)
+        self.dataChanged.emit(idx, idx)
+
     @Slot(str)
     def setCurrent(self, video_id: str):
         """Track the active video; never fetches — load is on demand."""
@@ -56,7 +87,9 @@ class CommentsModel(QObject):
             return
         self._video_id = video_id
         if self._items or self._next_token:
+            self.beginResetModel()
             self._items = []
+            self.endResetModel()
             self._next_token = ""
             self.changed.emit()
 
@@ -93,7 +126,7 @@ class CommentsModel(QObject):
         try:
             await self._action_fn(self._client, bearer, action)
             item["liked"] = not unliking
-            self.changed.emit()
+            self._row_changed(index)
             self.message.emit("comment unliked" if unliking
                               else "comment liked")
         except Exception as exc:
@@ -134,7 +167,11 @@ class CommentsModel(QObject):
         self._set_loading(False)
         if video_id != self._video_id:
             return
-        self._items.extend(_to_item(c, 0) for c in more)
+        if more:
+            first = len(self._items)
+            self.beginInsertRows(QModelIndex(), first, first + len(more) - 1)
+            self._items.extend(_to_item(c, 0) for c in more)
+            self.endInsertRows()
         self._next_token = token
         cached = self._cache.get(video_id)
         if cached is not None:
@@ -158,9 +195,12 @@ class CommentsModel(QObject):
             end = index + 1
             while end < len(self._items) and self._items[end]["depth"] == 1:
                 end += 1
-            del self._items[index + 1:end]
+            if end > index + 1:
+                self.beginRemoveRows(QModelIndex(), index + 1, end - 1)
+                del self._items[index + 1:end]
+                self.endRemoveRows()
             item["expanded"] = False
-            self.changed.emit()
+            self._row_changed(index)
             return
         token = item["replyToken"]
         replies = self._reply_cache.get(token)
@@ -178,9 +218,14 @@ class CommentsModel(QObject):
             self._set_loading(False)
             if video_id != self._video_id:
                 return
-        self._items[index + 1:index + 1] = [_to_item(c, 1) for c in replies]
+        if replies:
+            self.beginInsertRows(QModelIndex(), index + 1,
+                                 index + len(replies))
+            self._items[index + 1:index + 1] = [_to_item(c, 1)
+                                                for c in replies]
+            self.endInsertRows()
         item["expanded"] = True
-        self.changed.emit()
+        self._row_changed(index)
 
     async def _fill_reply_tokens(self):
         video_id = self._video_id
@@ -196,14 +241,10 @@ class CommentsModel(QObject):
         self._web_tokens_for.add(video_id)
         tokens = {c.comment_id: c.reply_token
                   for c in web_comments if c.reply_token}
-        changed = False
         for item in self._items:
             token = tokens.get(item["id"], "")
             if token and not item["replyToken"]:
-                item["replyToken"] = token
-                changed = True
-        if changed:
-            self.changed.emit()
+                item["replyToken"] = token  # internal, not a visible role
 
     def _remember(self, video_id: str, comments, token: str):
         self._cache[video_id] = (comments, token)
@@ -215,7 +256,9 @@ class CommentsModel(QObject):
         if video_id != self._video_id:
             self.changed.emit()
             return  # video changed while fetching
+        self.beginResetModel()  # fresh listing: top-of-list is correct here
         self._items = [_to_item(c, 0) for c in comments]
+        self.endResetModel()
         self._next_token = token
         self.changed.emit()
 

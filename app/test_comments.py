@@ -225,9 +225,61 @@ def test_comments_model():
     print("comments model: ok")
 
 
+def test_comments_qt_model():
+    # The model must mutate granularly (insert/remove/dataChanged), never
+    # reset wholesale — a reset makes the view drop its scroll position.
+    from PySide6.QtCore import QAbstractListModel
+
+    async def fetch(client, video_id, bearer=None):
+        return ([Comment("@a", "hi", "1", "now", "2", "c1", "RTOK"),
+                 Comment("@b", "yo", "", "now", "", "c2", "")], "PAGE2")
+
+    async def fetch_page(client, token, bearer=None):
+        if token == "RTOK":
+            return ([Comment("@r", "reply", "", "now", "", "r1", "")], "")
+        return ([Comment("@c", "more", "", "now", "", "c3", "")], "")
+
+    m = CommentsModel(client=None, fetch_fn=fetch, page_fn=fetch_page)
+    assert isinstance(m, QAbstractListModel)
+    resets, inserts, removes = [], [], []
+    m.modelReset.connect(lambda: resets.append(1))
+    m.rowsInserted.connect(lambda p, a, b: inserts.append((a, b)))
+    m.rowsRemoved.connect(lambda p, a, b: removes.append((a, b)))
+
+    m.setCurrent("aaaaaaaaaaa")
+    asyncio.run(m._load())
+    assert m.rowCount() == 2
+    initial_resets = len(resets)  # initial load may reset; that's fine
+
+    # Page append: rows inserted at the end, NO reset.
+    asyncio.run(m._load_more())
+    assert m.rowCount() == 3
+    assert inserts[-1] == (2, 2)
+    assert len(resets) == initial_resets
+
+    # Reply expansion inserts right after the parent, NO reset.
+    asyncio.run(m._toggle(0))
+    assert m.rowCount() == 4
+    assert inserts[-1] == (1, 1)
+    assert len(resets) == initial_resets
+
+    # Collapse removes those rows, NO reset.
+    asyncio.run(m._toggle(0))
+    assert m.rowCount() == 3
+    assert removes[-1] == (1, 1)
+    assert len(resets) == initial_resets
+
+    # Role data is reachable (author role resolves).
+    roles = {bytes(v): k for k, v in m.roleNames().items()}
+    idx = m.index(0)
+    assert m.data(idx, roles[b"author"]) == "@a"
+    print("comments qt model: ok")
+
+
 if __name__ == "__main__":
     test_parse_comments()
     test_create_comment_params()
     test_android_comments_token()
     test_comments_model()
+    test_comments_qt_model()
     print("all checks passed")

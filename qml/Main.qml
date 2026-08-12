@@ -661,7 +661,7 @@ Window {
                                        : "save to playlist")
                                     : playerView.panelMode === "comments"
                                     ? (comments.loading ? "comments — loading…"
-                                       : "comments (" + comments.items.length
+                                       : "comments (" + commList.count
                                          + (comments.hasMore ? "+" : "") + ")")
                                     : related.loading ? "related — loading…"
                                     : "related" + (related.channelName !== ""
@@ -718,14 +718,23 @@ Window {
                             height: parent.height - th.barHeight
                             visible: playerView.panelMode === "comments"
                             clip: true
-                            model: comments.items
+                            model: comments
                             currentIndex: 0
                             spacing: 1
 
                             delegate: Rectangle {
                                 id: commCell
-                                required property var modelData
                                 required property int index
+                                required property string author
+                                required property string text
+                                required property string likes
+                                required property string published
+                                required property string replies
+                                required property int depth
+                                required property bool hasReplies
+                                required property bool expanded
+                                required property string avatar
+                                required property bool liked
                                 readonly property bool sel:
                                     ListView.isCurrentItem
                                 width: commList.width
@@ -745,7 +754,7 @@ Window {
                                     anchors.left: parent.left
                                     anchors.right: parent.right
                                     anchors.leftMargin: 10
-                                        + commCell.modelData.depth * 18
+                                        + commCell.depth * 18
                                     anchors.rightMargin: 6
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: 3
@@ -756,22 +765,22 @@ Window {
                                             width: 26
                                             height: 26
                                             color: th.bg1
-                                            visible: commCell.modelData.avatar !== ""
+                                            visible: commCell.avatar !== ""
                                             Image {
                                                 anchors.fill: parent
                                                 asynchronous: true
                                                 sourceSize.width: 26
-                                                source: commCell.modelData.avatar
+                                                source: commCell.avatar
                                             }
                                         }
                                         Text {
-                                            text: commCell.modelData.author
+                                            text: commCell.author
                                             color: th.fg
                                             font.pixelSize: th.fontSizeSmall
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
                                         Text {
-                                            text: commCell.modelData.published
+                                            text: commCell.published
                                             color: th.emptyDim
                                             font.pixelSize: th.fontSizeSmall
                                             anchors.verticalCenter: parent.verticalCenter
@@ -779,7 +788,7 @@ Window {
                                     }
                                     Text {
                                         width: parent.width
-                                        text: commCell.modelData.text
+                                        text: commCell.text
                                         color: th.fg
                                         font.pixelSize: th.fontSize
                                         wrapMode: Text.Wrap
@@ -787,23 +796,23 @@ Window {
                                     Row {
                                         spacing: 8
                                         Text {
-                                            text: (commCell.modelData.liked ? "♥ " : "")
-                                                  + (commCell.modelData.likes !== ""
-                                                     ? commCell.modelData.likes + " likes"
-                                                     : (commCell.modelData.liked ? "liked" : ""))
-                                            color: commCell.modelData.liked
+                                            text: (commCell.liked ? "♥ " : "")
+                                                  + (commCell.likes !== ""
+                                                     ? commCell.likes + " likes"
+                                                     : (commCell.liked ? "liked" : ""))
+                                            color: commCell.liked
                                                 ? th.accent : th.emptyDim
                                             font.pixelSize: th.fontSizeSmall
                                             visible: text !== ""
                                         }
                                         Text {
-                                            text: (commCell.modelData.expanded ? "▾" : "▸")
-                                                  + " " + commCell.modelData.replies
+                                            text: (commCell.expanded ? "▾" : "▸")
+                                                  + " " + commCell.replies
                                                   + " replies (enter)"
                                             color: th.fgDim
                                             font.pixelSize: th.fontSizeSmall
-                                            visible: commCell.modelData.hasReplies
-                                                     && commCell.modelData.depth === 0
+                                            visible: commCell.hasReplies
+                                                     && commCell.depth === 0
                                         }
                                     }
                                 }
@@ -900,17 +909,15 @@ Window {
                         const isRel = mode === "related"
                         const list = isRel ? relList
                             : mode === "comments" ? commList : plList
-                        const items = isRel ? related.items
-                            : mode === "comments" ? comments.items : picker.items
                         const it = isRel && list.currentIndex >= 0
-                            && list.currentIndex < items.length
-                            ? items[list.currentIndex] : null
+                            && list.currentIndex < related.items.length
+                            ? related.items[list.currentIndex] : null
                         switch (event.key) {
                         case Qt.Key_J: case Qt.Key_Down:
                             list.currentIndex = Math.min(
-                                items.length - 1, list.currentIndex + 1)
-                            if (!isRel && comments.hasMore
-                                    && list.currentIndex === items.length - 1)
+                                list.count - 1, list.currentIndex + 1)
+                            if (mode === "comments" && comments.hasMore
+                                    && list.currentIndex === list.count - 1)
                                 comments.loadMore()
                             event.accepted = true; return
                         case Qt.Key_K: case Qt.Key_Up:
