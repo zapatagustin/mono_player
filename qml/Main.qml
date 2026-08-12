@@ -491,7 +491,8 @@ Window {
                     id: poolArea
                     anchors.fill: parent
                     // The video shrinks when a side panel is open.
-                    anchors.rightMargin: playerView.panelMode !== "" ? 380 : 0
+                    anchors.rightMargin: playerView.panelMode !== ""
+                        ? sidePanel.width : 0
 
                 Repeater {
                     id: playersRepeater
@@ -636,7 +637,8 @@ Window {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    width: 380
+                    // Wide enough to read comments: 40% of the view, capped.
+                    width: Math.min(560, Math.round(playerView.width * 0.4))
                     visible: playerView.panelMode !== ""
                     color: th.bg
                     border.color: th.bg2
@@ -751,14 +753,14 @@ Window {
                                     Row {
                                         spacing: 6
                                         Rectangle {
-                                            width: 18
-                                            height: 18
+                                            width: 26
+                                            height: 26
                                             color: th.bg1
                                             visible: commCell.modelData.avatar !== ""
                                             Image {
                                                 anchors.fill: parent
                                                 asynchronous: true
-                                                sourceSize.width: 18
+                                                sourceSize.width: 26
                                                 source: commCell.modelData.avatar
                                             }
                                         }
@@ -778,8 +780,8 @@ Window {
                                     Text {
                                         width: parent.width
                                         text: commCell.modelData.text
-                                        color: th.fgDim
-                                        font.pixelSize: th.fontSizeSmall
+                                        color: th.fg
+                                        font.pixelSize: th.fontSize
                                         wrapMode: Text.Wrap
                                     }
                                     Row {
