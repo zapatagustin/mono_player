@@ -914,7 +914,12 @@ Window {
                             playerView.togglePanel("related")
                             event.accepted = true; return
                         case Qt.Key_C:
-                            playerView.togglePanel("comments")
+                            if (event.modifiers & Qt.ShiftModifier) {
+                                root.promptKind = "comment"
+                                root.prompting = true
+                            } else {
+                                playerView.togglePanel("comments")
+                            }
                             event.accepted = true; return
                         case Qt.Key_B:
                             playerView.togglePanel("playlist")
@@ -1024,8 +1029,7 @@ Window {
                     height: parent.height
                     visible: width > 0
                     verticalAlignment: Text.AlignVCenter
-                    leftPadding: 8
-                    rightPadding: 8
+                    horizontalAlignment: Text.AlignHCenter
                     text: "as " + auth.channelName
                     color: th.fgDim
                     font.pixelSize: th.fontSizeSmall
@@ -1039,13 +1043,14 @@ Window {
                 // Feed context (what the grid is showing) while browsing.
                 Text {
                     id: contextTag
+                    // No paddings here: implicitWidth includes them and the
+                    // width binding would loop. Center within the +16.
                     width: !root.watching && feed.contextLabel !== ""
                         ? implicitWidth + 16 : 0
                     height: parent.height
                     visible: width > 0
                     verticalAlignment: Text.AlignVCenter
-                    leftPadding: 8
-                    rightPadding: 8
+                    horizontalAlignment: Text.AlignHCenter
                     text: feed.contextLabel
                     color: th.fg
                     font.pixelSize: th.fontSizeSmall

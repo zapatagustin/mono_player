@@ -344,6 +344,31 @@ def test_resolved_url_cache():
     print("resolved url cache: ok")
 
 
+def test_fresh_load_retry():
+    # A FRESH (non-cached) load that errors — transient 403s on freshly
+    # extracted URLs happen — retries the materialization once, then stops.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        m = make_manager(store)
+        ev = collect(m)
+
+        m.playVideo("aaaaaaaaaaa", "A")
+        t1 = store.load()[0][0].id
+        ev.clear()
+        m.loadFailed(t1)
+        assert ("cmd", t1, ["loadfile", url("aaaaaaaaaaa"), "replace"]) in ev
+        ev.clear()
+        m.loadFailed(t1)  # second failure: no retry loop
+        assert ev == []
+
+        # A fresh user-initiated load re-arms the retry.
+        m.playVideo("bbbbbbbbbbb", "B")
+        ev.clear()
+        m.loadFailed(t1)
+        assert ("cmd", t1, ["loadfile", url("bbbbbbbbbbb"), "replace"]) in ev
+    print("fresh load retry: ok")
+
+
 if __name__ == "__main__":
     test_store()
     test_materialize()
@@ -354,4 +379,5 @@ if __name__ == "__main__":
     test_per_tab_state()
     test_enqueue_playnext()
     test_resolved_url_cache()
+    test_fresh_load_retry()
     print("all checks passed")

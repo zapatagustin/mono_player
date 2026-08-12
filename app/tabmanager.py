@@ -46,12 +46,13 @@ def materialize(tab: Tab, resolve=None) -> list[list]:
 
 
 class _LivePlayer:
-    __slots__ = ("offset", "used_cache", "last_active")
+    __slots__ = ("offset", "used_cache", "last_active", "retried")
 
     def __init__(self, offset: int, now: float):
         self.offset = offset
         self.used_cache = False
         self.last_active = now
+        self.retried = False  # one automatic retry per user-initiated load
 
 
 class TabManager(QAbstractListModel):
@@ -237,18 +238,20 @@ class TabManager(QAbstractListModel):
 
     @Slot(int)
     def loadFailed(self, tab_id: int):
-        """A load errored. If it rode a cached URL (stale despite the expiry
-        margin), drop the entries and retry once through the original page."""
+        """A load errored. Retry the materialization once: cached URLs are
+        invalidated first (stale despite the expiry margin), and fresh
+        extractions get one more shot too — googlevideo 403s transiently."""
         live = self._live.get(tab_id)
         row = self._row_of(tab_id)
-        if live is None or row is None or not live.used_cache:
+        if live is None or row is None or live.retried:
             return
-        if self._url_cache is not None:
+        if live.used_cache and self._url_cache is not None:
             for item in self._tabs[row].queue:
                 self._url_cache.invalidate(item.video_id)
         live.used_cache = False
+        live.retried = True
         if row == self._active:
-            self._materialize_active(use_cache=False)
+            self._materialize_active(use_cache=False, is_retry=True)
 
     @Slot()
     def persistActive(self):
@@ -259,7 +262,8 @@ class TabManager(QAbstractListModel):
 
     # --- internals ---
 
-    def _materialize_active(self, use_cache: bool = True):
+    def _materialize_active(self, use_cache: bool = True,
+                            is_retry: bool = False):
         tab = self._tabs[self._active]
         if tab.id not in self._live:
             self._ensure_capacity()
@@ -269,6 +273,8 @@ class TabManager(QAbstractListModel):
         live.offset = min(max(0, tab.queue_idx), max(0, len(tab.queue) - 1))
         live.used_cache = False
         live.last_active = self._now()
+        if not is_retry:
+            live.retried = False  # user-initiated load re-arms the retry
         self._loading_since = time.monotonic()
         resolve = (lambda vid: self._resolve(live, vid)) if use_cache else None
         cmds = materialize(tab, resolve)
