@@ -4,7 +4,15 @@ load-more and reply expansion."""
 
 import asyncio
 
-from innertube import Comment, parse_comments, parse_create_comment_params
+import base64
+from urllib.parse import quote
+
+from innertube import (
+    Comment,
+    parse_android_comments_token,
+    parse_comments,
+    parse_create_comment_params,
+)
 from comments import CommentsModel
 
 
@@ -13,8 +21,19 @@ def payload(cid, author, text, likes="", replies="", published="1 day ago"):
         "key": cid,
         "properties": {"commentId": cid, "content": {"content": text},
                        "publishedTime": published},
-        "author": {"channelId": "UCx", "displayName": author},
+        "author": {"channelId": "UCx", "displayName": author,
+                   "avatarThumbnailUrl": f"https://a/{author}.jpg"},
         "toolbar": {"likeCountNotliked": likes, "replyCount": replies},
+    }}}
+
+
+def toolbar(cid, action):
+    key = quote(base64.b64encode(
+        b"\x12\x1d" + cid.encode() + b"/12 F(").decode())
+    return {"payload": {"engagementToolbarSurfaceEntityPayload": {
+        "key": key,
+        "likeCommand": {"innertubeCommand": {
+            "performCommentActionEndpoint": {"action": action}}},
     }}}
 
 
@@ -35,23 +54,29 @@ def test_parse_comments():
     data = {
         "onResponseReceivedEndpoints": [{"reloadContinuationItemsCommand": {
             "continuationItems": [
-                thread("c1", reply_token="REPLIES_C1"),
-                thread("c2"),
+                thread("UgxAliceAAAAAAAAAAAAAAA", reply_token="REPLIES_C1"),
+                thread("UgxEveBBBBBBBBBBBBBBBBB"),
                 {"continuationItemRenderer": {"continuationEndpoint": {
                     "continuationCommand": {"token": "PAGE2"}}}},
             ],
         }}],
         "frameworkUpdates": {"entityBatchUpdate": {"mutations": [
-            payload("c1", "@alice", "First", likes="5K", replies="29"),
-            payload("c2", "@eve", "Second"),
+            payload("UgxAliceAAAAAAAAAAAAAAA", "@alice", "First", likes="5K", replies="29"),
+            payload("UgxEveBBBBBBBBBBBBBBBBB", "@eve", "Second"),
             payload("orphan", "@x", "not referenced by any thread"),
         ]}},
     }
+    data["frameworkUpdates"]["entityBatchUpdate"]["mutations"].append(
+        toolbar("UgxAliceAAAAAAAAAAAAAAA", "LIKE_ACTION_C1"))
     comments, next_token = parse_comments(data)
     assert next_token == "PAGE2"
     assert comments == [
-        Comment("@alice", "First", "5K", "1 day ago", "29", "c1", "REPLIES_C1"),
-        Comment("@eve", "Second", "", "1 day ago", "", "c2", ""),
+        Comment("@alice", "First", "5K", "1 day ago", "29",
+                "UgxAliceAAAAAAAAAAAAAAA", "REPLIES_C1",
+                "https://a/@alice.jpg", "LIKE_ACTION_C1"),
+        Comment("@eve", "Second", "", "1 day ago", "",
+                "UgxEveBBBBBBBBBBBBBBBBB", "",
+                "https://a/@eve.jpg", ""),
     ]
 
     # Replies page: no threads — payloads in document order, no next token.
@@ -79,14 +104,31 @@ def test_create_comment_params():
     print("create comment params: ok")
 
 
+def test_android_comments_token():
+    data = {"x": [{"engagementPanelSectionListRenderer": {
+        "panelIdentifier": "comment-item-section",
+        "content": {"sectionListRenderer": {"continuations": [
+            {"reloadContinuationData": {"continuation": "ANDROID_TOK"}}]}},
+    }}, {"engagementPanelSectionListRenderer": {
+        "panelIdentifier": "engagement-panel-clip-create",
+        "content": {"sectionListRenderer": {"continuations": [
+            {"reloadContinuationData": {"continuation": "OTHER"}}]}},
+    }}]}
+    assert parse_android_comments_token(data) == "ANDROID_TOK"
+    assert parse_android_comments_token({}) == ""
+    assert parse_android_comments_token(None) == ""
+    print("android comments token: ok")
+
+
 def test_comments_model():
     calls = []
 
-    async def fetch(client, video_id):
+    async def fetch(client, video_id, bearer=None):
         calls.append(video_id)
-        return ([Comment("@a", "hi", "1", "now", "2", "c1", "RTOK")], "PAGE2")
+        return ([Comment("@a", "hi", "1", "now", "2", "c1", "RTOK",
+                         "https://a/a.jpg", "LIKEACT")], "PAGE2")
 
-    async def fetch_page(client, token):
+    async def fetch_page(client, token, bearer=None):
         calls.append(token)
         if token == "RTOK":
             return ([Comment("@r", "a reply", "", "now", "", "r1", "")], "")
@@ -122,6 +164,30 @@ def test_comments_model():
     assert len(calls) == n
     assert [i["author"] for i in m.items] == ["@a", "@r", "@b"]
 
+    # Avatar and like action ride the items.
+    assert m.items[0]["avatar"] == "https://a/a.jpg"
+    assert m.items[0]["likeAction"] == "LIKEACT"
+
+    # Liking a comment posts its action; no action -> login-required toast.
+    acted, msgs = [], []
+    m.message.connect(msgs.append)
+
+    async def act(client, bearer, action):
+        acted.append(action)
+        return True
+
+    class FakeAuth:
+        async def bearer(self):
+            return "tok"
+
+    m._auth = FakeAuth()
+    m._action_fn = act
+    asyncio.run(m._like(0))
+    assert acted == ["LIKEACT"]
+    assert msgs[-1] == "comment liked"
+    asyncio.run(m._like(2))  # "@b" has no like action
+    assert msgs[-1] == "like unavailable (login?)"
+
     # Switching video clears items and pagination state.
     m.setCurrent("bbbbbbbbbbb")
     assert m.items == [] and not m.hasMore
@@ -131,5 +197,6 @@ def test_comments_model():
 if __name__ == "__main__":
     test_parse_comments()
     test_create_comment_params()
+    test_android_comments_token()
     test_comments_model()
     print("all checks passed")

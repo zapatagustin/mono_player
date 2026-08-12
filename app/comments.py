@@ -18,18 +18,24 @@ def _to_item(comment, depth: int) -> dict:
         "replyToken": comment.reply_token,
         "hasReplies": comment.reply_token != "",
         "expanded": False,
+        "avatar": comment.avatar_url,
+        "likeAction": comment.like_action,
     }
 
 
 class CommentsModel(QObject):
     changed = Signal()
 
-    def __init__(self, client, fetch_fn=None, page_fn=None, cache_size=16,
-                 parent=None):
+    message = Signal(str)
+
+    def __init__(self, client, auth=None, fetch_fn=None, page_fn=None,
+                 cache_size=16, parent=None):
         super().__init__(parent)
         self._client = client
+        self._auth = auth
         self._fetch = fetch_fn or innertube.comments
         self._page = page_fn or innertube.comments_page
+        self._action_fn = innertube.comment_action
         self._cache: OrderedDict[str, tuple] = OrderedDict()
         self._reply_cache: dict[str, list] = {}
         self._cache_size = cache_size
@@ -61,6 +67,29 @@ class CommentsModel(QObject):
     def toggleReplies(self, index: int):
         asyncio.create_task(self._toggle(index))
 
+    @Slot(int)
+    def likeComment(self, index: int):
+        asyncio.create_task(self._like(index))
+
+    async def _like(self, index: int):
+        if not 0 <= index < len(self._items):
+            return
+        action = self._items[index]["likeAction"]
+        if not action:
+            # anonymous fetches carry no action params
+            self.message.emit("like unavailable (login?)")
+            return
+        bearer = await self._auth.bearer() if self._auth is not None else None
+        if bearer is None:
+            self.message.emit("login required (gl)")
+            return
+        try:
+            await self._action_fn(self._client, bearer, action)
+            self.message.emit("comment liked")
+        except Exception as exc:
+            print(f"comments: like failed: {exc!r}")
+            self.message.emit("comment like failed")
+
     async def _load(self):
         video_id = self._video_id
         if not video_id or self._loading:
@@ -71,8 +100,9 @@ class CommentsModel(QObject):
             self._apply(video_id, comments, token)
             return
         self._set_loading(True)
+        bearer = await self._auth.bearer() if self._auth is not None else None
         try:
-            comments, token = await self._fetch(self._client, video_id)
+            comments, token = await self._fetch(self._client, video_id, bearer)
         except Exception as exc:
             print(f"comments: fetch failed: {exc!r}")
             comments, token = [], ""
@@ -84,8 +114,10 @@ class CommentsModel(QObject):
         if not self._next_token or self._loading:
             return
         self._set_loading(True)
+        bearer = await self._auth.bearer() if self._auth is not None else None
         try:
-            more, token = await self._page(self._client, self._next_token)
+            more, token = await self._page(self._client, self._next_token,
+                                           bearer)
         except Exception as exc:
             print(f"comments: page failed: {exc!r}")
             more, token = [], ""
@@ -118,8 +150,10 @@ class CommentsModel(QObject):
         if replies is None:
             video_id = self._video_id
             self._set_loading(True)
+            bearer = (await self._auth.bearer()
+                      if self._auth is not None else None)
             try:
-                replies, _ = await self._page(self._client, token)
+                replies, _ = await self._page(self._client, token, bearer)
             except Exception as exc:
                 print(f"comments: replies failed: {exc!r}")
                 replies = []

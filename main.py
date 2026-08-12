@@ -101,7 +101,7 @@ def main() -> int:
     )
     tabs = TabManager(tab_store, url_cache=StreamUrlCache())
     related = RelatedModel(client, thumb_cache=thumb_cache)
-    comments = CommentsModel(client)
+    comments = CommentsModel(client, auth=auth)
     picker = PlaylistPicker(client, auth)
     # Prefetch related whenever the active video changes — the panel and
     # the channel jump (gc) are then instant. Comments only track the id;

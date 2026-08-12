@@ -390,6 +390,37 @@ class Comment:
     replies: str
     comment_id: str = ""
     reply_token: str = ""  # continuation for this comment's replies
+    avatar_url: str = ""
+    like_action: str = ""  # perform_comment_action param (auth fetches only)
+
+
+_COMMENT_ID_IN_KEY = re.compile(rb"(Ug[0-9A-Za-z_-]{10,})/")
+
+
+def _toolbar_like_actions(data) -> dict:
+    """commentId -> like action param, from the engagement toolbar surface
+    payloads (their entity key embeds the comment id). Auth fetches only —
+    anonymous toolbars carry a sign-in modal instead."""
+    import base64
+    from urllib.parse import unquote
+    actions = {}
+    for _, tb in _find_renderers(
+            data, frozenset({"engagementToolbarSurfaceEntityPayload"})):
+        key = tb.get("key")
+        if not isinstance(key, str):
+            continue
+        try:
+            decoded = base64.b64decode(unquote(key) + "===")
+        except Exception:
+            continue
+        match = _COMMENT_ID_IN_KEY.search(decoded)
+        if not match:
+            continue
+        action = _walk(tb, "likeCommand", "innertubeCommand",
+                       "performCommentActionEndpoint", "action")
+        if isinstance(action, str) and action:
+            actions[match.group(1).decode()] = action
+    return actions
 
 
 def _parse_comment_payload(payload) -> Comment | None:
@@ -404,6 +435,7 @@ def _parse_comment_payload(payload) -> Comment | None:
     likes = _walk(payload, "toolbar", "likeCountNotliked")
     replies = _walk(payload, "toolbar", "replyCount")
     published = props.get("publishedTime")
+    avatar = _walk(payload, "author", "avatarThumbnailUrl")
     return Comment(
         author,
         text,
@@ -411,6 +443,8 @@ def _parse_comment_payload(payload) -> Comment | None:
         published if isinstance(published, str) else "",
         replies if isinstance(replies, str) else "",
         cid if isinstance(cid, str) else "",
+        "",
+        avatar if isinstance(avatar, str) else "",
     )
 
 
@@ -436,18 +470,23 @@ def parse_comments(data) -> tuple[list[Comment], str]:
             if comment.comment_id:
                 by_id[comment.comment_id] = comment
 
+    like_actions = _toolbar_like_actions(data)
+
+    def _with_extras(base: Comment, reply_token: str) -> Comment:
+        return Comment(base.author, base.text, base.likes, base.published,
+                       base.replies, base.comment_id, reply_token,
+                       base.avatar_url,
+                       like_actions.get(base.comment_id, ""))
+
     comments = []
     for _, thread in _find_renderers(data, frozenset({"commentThreadRenderer"})):
         cid = _walk(thread, "commentViewModel", "commentViewModel", "commentId")
         base = by_id.get(cid) if isinstance(cid, str) else None
         if base is None:
             continue
-        token = _first_token(thread.get("replies"))
-        comments.append(
-            Comment(base.author, base.text, base.likes, base.published,
-                    base.replies, base.comment_id, token))
+        comments.append(_with_extras(base, _first_token(thread.get("replies"))))
     if not comments:
-        comments = in_order
+        comments = [_with_extras(c, c.reply_token) for c in in_order]
 
     next_token = ""
     endpoints = data.get("onResponseReceivedEndpoints") \
@@ -464,6 +503,14 @@ def parse_comments(data) -> tuple[list[Comment], str]:
                 if isinstance(item, dict) else None
             if isinstance(cont, dict):
                 next_token = _first_token(cont) or next_token
+    if not next_token:
+        # ANDROID pages carry it as legacy nextContinuationData instead.
+        for _, cont in _find_renderers(
+                data, frozenset({"nextContinuationData"})):
+            token = cont.get("continuation")
+            if isinstance(token, str) and token:
+                next_token = token
+                break
     return comments, next_token
 
 
@@ -486,31 +533,76 @@ def parse_comments_token(data) -> str:
     return ""
 
 
-async def comments_page(client, token: str) -> tuple[list[Comment], str]:
+def parse_android_comments_token(data) -> str:
+    """The comments continuation in an ANDROID `next`: it lives inside the
+    engagement panel whose panelIdentifier is comment-item-section."""
+    for _, panel in _find_renderers(
+            data, frozenset({"engagementPanelSectionListRenderer"})):
+        if panel.get("panelIdentifier") != "comment-item-section":
+            continue
+        for _, cont in _find_renderers(
+                panel, frozenset({"reloadContinuationData",
+                                  "nextContinuationData"})):
+            token = cont.get("continuation")
+            if isinstance(token, str) and token:
+                return token
+    return ""
+
+
+def _comments_request(token_or_video: dict, bearer: str | None) -> tuple:
+    """(context, headers) for a comments call: authenticated ANDROID when a
+    bearer is available (toolbars carry real like actions), anonymous WEB
+    otherwise."""
+    if bearer:
+        return _account_context(), _account_headers(bearer)
+    return WEB_CONTEXT, {"content-type": "application/json"}
+
+
+async def comments_page(client, token: str,
+                        bearer: str | None = None) -> tuple[list[Comment], str]:
     """One `next {continuation}` call: a further comments page, or a
     comment's replies (same endpoint, thread-less response)."""
+    context, headers = _comments_request({}, bearer)
     resp = await client.post(
         NEXT_URL,
-        json={"context": WEB_CONTEXT, "continuation": token},
-        headers={"content-type": "application/json"},
+        json={"context": context, "continuation": token},
+        headers=headers,
     )
     resp.raise_for_status()
     return parse_comments(resp.json())
 
 
-async def comments(client, video_id: str) -> tuple[list[Comment], str]:
+async def comments(client, video_id: str,
+                   bearer: str | None = None) -> tuple[list[Comment], str]:
     """Top-level comments, first page: `next` for the section token, then
     the continuation for the payloads."""
+    context, headers = _comments_request({}, bearer)
     resp = await client.post(
         NEXT_URL,
-        json={"context": WEB_CONTEXT, "videoId": video_id},
-        headers={"content-type": "application/json"},
+        json={"context": context, "videoId": video_id},
+        headers=headers,
     )
     resp.raise_for_status()
-    token = parse_comments_token(resp.json())
+    data = resp.json()
+    token = (parse_android_comments_token(data) if bearer
+             else parse_comments_token(data))
     if not token:
         return [], ""
-    return await comments_page(client, token)
+    return await comments_page(client, token, bearer)
+
+
+COMMENT_ACTION_URL = \
+    "https://www.youtube.com/youtubei/v1/comment/perform_comment_action"
+
+
+async def comment_action(client, bearer: str, action: str) -> bool:
+    resp = await client.post(
+        COMMENT_ACTION_URL,
+        json={"context": _account_context(), "actions": [action]},
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return True
 
 
 _PLAYLIST_LIST_RENDERERS = frozenset({

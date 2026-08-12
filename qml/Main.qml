@@ -127,6 +127,10 @@ Window {
         function onMessage(msg) { root.notify(msg) }
     }
     Connections {
+        target: comments
+        function onMessage(msg) { root.notify(msg) }
+    }
+    Connections {
         target: feed
         function onMessage(msg) { root.notify(msg) }
     }
@@ -746,15 +750,29 @@ Window {
 
                                     Row {
                                         spacing: 6
+                                        Rectangle {
+                                            width: 18
+                                            height: 18
+                                            color: th.bg1
+                                            visible: commCell.modelData.avatar !== ""
+                                            Image {
+                                                anchors.fill: parent
+                                                asynchronous: true
+                                                sourceSize.width: 18
+                                                source: commCell.modelData.avatar
+                                            }
+                                        }
                                         Text {
                                             text: commCell.modelData.author
                                             color: th.fg
                                             font.pixelSize: th.fontSizeSmall
+                                            anchors.verticalCenter: parent.verticalCenter
                                         }
                                         Text {
                                             text: commCell.modelData.published
                                             color: th.emptyDim
                                             font.pixelSize: th.fontSizeSmall
+                                            anchors.verticalCenter: parent.verticalCenter
                                         }
                                     }
                                     Text {
@@ -924,6 +942,13 @@ Window {
                         case Qt.Key_B:
                             playerView.togglePanel("playlist")
                             event.accepted = true; return
+                        case Qt.Key_L:
+                            if (mode === "comments"
+                                    && (event.modifiers & Qt.ShiftModifier)) {
+                                comments.likeComment(commList.currentIndex)
+                                event.accepted = true; return
+                            }
+                            break
                         case Qt.Key_Escape:
                             playerView.panelMode = ""
                             event.accepted = true; return
