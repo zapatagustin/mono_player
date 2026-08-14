@@ -629,14 +629,46 @@ async def comment_action(client, bearer: str, action: str) -> bool:
 
 _PLAYLIST_LIST_RENDERERS = frozenset({
     "gridPlaylistRenderer", "compactPlaylistRenderer", "playlistRenderer",
+    "compactPlaylistModel",
 })
+
+
+def _parse_compact_playlist_model(pr) -> Video | None:
+    """Authenticated ANDROID FEplaylist_aggregation shape: data under
+    compactPlaylistData, id as a VL-prefixed browseId."""
+    pd = pr.get("compactPlaylistData")
+    if not isinstance(pd, dict):
+        return None
+    browse_id = _walk(pd, "onTap", "innertubeCommand",
+                      "browseEndpoint", "browseId")
+    title = _walk(pd, "metadata", "title")
+    if (not isinstance(browse_id, str) or not browse_id.startswith("VL")
+            or len(browse_id) <= 2 or not isinstance(title, str)):
+        return None
+    thumb = _walk(pd, "thumbnail", "image", "sources", -1, "url")
+    count = _walk(pd, "thumbnail", "videoCountA11y")
+    return Video(
+        "",
+        title,
+        "",
+        "",
+        thumb if isinstance(thumb, str) else "",
+        "",
+        count if isinstance(count, str) else "",
+        browse_id[2:],
+    )
 
 
 def parse_playlists_list(data) -> list[Video]:
     """The account's playlists as feed entries: empty video_id,
     playlist_id set, count in meta."""
     playlists = []
-    for _, pr in _find_renderers(data, _PLAYLIST_LIST_RENDERERS):
+    for name, pr in _find_renderers(data, _PLAYLIST_LIST_RENDERERS):
+        if name == "compactPlaylistModel":
+            video = _parse_compact_playlist_model(pr)
+            if video is not None:
+                playlists.append(video)
+            continue
         pid = pr.get("playlistId")
         title = _text(pr.get("title"))
         if not isinstance(pid, str) or not pid or title is None:

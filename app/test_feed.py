@@ -229,6 +229,30 @@ def test_playlists_list_parser():
         Video("", "My Mix", "", "", "https://t/pl.jpg", "", "42 videos",
               "PLabc123"),
     ]
+    # Authenticated ANDROID shape: compactPlaylistModel inside
+    # elementRenderer, VL-prefixed browseId, count in videoCountA11y.
+    android = {"elementRenderer": {"deep": {"compactPlaylistModel": {
+        "compactPlaylistData": {
+            "thumbnail": {
+                "image": {"sources": [{"url": "https://t/wl.jpg"}]},
+                "videoCountA11y": "446 videos",
+            },
+            "metadata": {"title": "Watch later"},
+            "onTap": {"innertubeCommand": {
+                "browseEndpoint": {"browseId": "VLWL"}}},
+        }}}}}
+    assert parse_playlists_list(android) == [
+        Video("", "Watch later", "", "", "https://t/wl.jpg", "",
+              "446 videos", "WL"),
+    ]
+    # Degrades on missing data / bare "VL".
+    assert parse_playlists_list({"compactPlaylistModel": {}}) == []
+    assert parse_playlists_list({"compactPlaylistModel": {
+        "compactPlaylistData": {
+            "metadata": {"title": "x"},
+            "onTap": {"innertubeCommand": {
+                "browseEndpoint": {"browseId": "VL"}}}}}}) == []
+
     assert parse_playlists_list({}) == []
     assert parse_playlists_list(None) == []
     print("playlists list parser: ok")
