@@ -40,12 +40,38 @@ Window {
     onPromptingChanged: refocus()
     Component.onCompleted: refocus()
 
+    // Bindings are POSITIONAL (physical QWERTY spots), independent of the
+    // active keyboard layout — same policy as the user's Hyprland setup:
+    // hjkl stay put under dvorak & friends. nativeScanCode is the evdev
+    // keycode + 8 (the historic X offset, preserved by Qt on Wayland/X11);
+    // unknown scancodes (Return, Esc, arrows, other platforms) fall back
+    // to the layout keysym. Prompt TEXT entry is untouched: TextFields
+    // never route through these handlers.
+    readonly property var scanKey: ({
+        10: Qt.Key_1, 11: Qt.Key_2, 12: Qt.Key_3, 13: Qt.Key_4,
+        14: Qt.Key_5, 15: Qt.Key_6, 16: Qt.Key_7, 17: Qt.Key_8,
+        18: Qt.Key_9, 19: Qt.Key_0,
+        24: Qt.Key_Q, 25: Qt.Key_W, 26: Qt.Key_E, 27: Qt.Key_R,
+        28: Qt.Key_T, 29: Qt.Key_Y, 30: Qt.Key_U, 31: Qt.Key_I,
+        32: Qt.Key_O, 33: Qt.Key_P,
+        38: Qt.Key_A, 39: Qt.Key_S, 40: Qt.Key_D, 41: Qt.Key_F,
+        42: Qt.Key_G, 43: Qt.Key_H, 44: Qt.Key_J, 45: Qt.Key_K,
+        46: Qt.Key_L,
+        52: Qt.Key_Z, 53: Qt.Key_X, 54: Qt.Key_C, 55: Qt.Key_V,
+        56: Qt.Key_B, 57: Qt.Key_N, 58: Qt.Key_M, 61: Qt.Key_Slash,
+    })
+    function posKey(event) {
+        const k = scanKey[event.nativeScanCode]
+        return k !== undefined ? k : event.key
+    }
+
     // Vim g-prefix dispatcher, shared by browse and watch modes.
     // Returns true when the key was consumed.
     function gKey(event) {
+        const key = posKey(event)
         if (root.pending === "g") {
             root.pending = ""
-            switch (event.key) {
+            switch (key) {
             case Qt.Key_G: grid.currentIndex = 0; return true
             case Qt.Key_T: tabs.activate(event.modifiers & Qt.ShiftModifier
                 ? (tabs.activeIndex - 1 + strip.count) % Math.max(1, strip.count)
@@ -95,7 +121,7 @@ Window {
             }
             return true  // unknown g-sequence: swallow, reset
         }
-        if (event.key === Qt.Key_G && !(event.modifiers & Qt.ShiftModifier)) {
+        if (key === Qt.Key_G && !(event.modifiers & Qt.ShiftModifier)) {
             root.pending = "g"
             return true
         }
@@ -103,11 +129,12 @@ Window {
     }
 
     function tabKey(event) {
-        if (event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
-            tabs.activate(event.key - Qt.Key_1)
+        const key = posKey(event)
+        if (key >= Qt.Key_1 && key <= Qt.Key_9) {
+            tabs.activate(key - Qt.Key_1)
             return true
         }
-        if (event.key === Qt.Key_X) {
+        if (key === Qt.Key_X) {
             if (tabs.activeIndex >= 0) tabs.closeTab(tabs.activeIndex)
             if (tabs.activeIndex < 0) root.watching = false
             return true
@@ -248,7 +275,7 @@ Window {
                     }
                     const cols = Math.max(1, Math.floor(grid.width / grid.cellWidth))
                     const cur = grid.currentItem
-                    switch (event.key) {
+                    switch (root.posKey(event)) {
                     case Qt.Key_H: case Qt.Key_Left:
                         grid.currentIndex = Math.max(0, grid.currentIndex - 1); break
                     case Qt.Key_L: case Qt.Key_Right:
@@ -986,6 +1013,7 @@ Window {
                         event.accepted = true
                         return
                     }
+                    const key = root.posKey(event)
                     // Panel navigation captures j/k/enter while open.
                     if (playerView.panelMode !== "") {
                         const mode = playerView.panelMode
@@ -996,7 +1024,7 @@ Window {
                         const it = isRel && list.currentIndex >= 0
                             && list.currentIndex < related.items.length
                             ? related.items[list.currentIndex] : null
-                        switch (event.key) {
+                        switch (key) {
                         case Qt.Key_J: case Qt.Key_Down:
                             // Shift+J in the queue panel: move item down.
                             if (mode === "queue"
@@ -1080,7 +1108,7 @@ Window {
                     }
                     // Keys that must work even with no live player (a black
                     // watch view must never trap the user).
-                    switch (event.key) {
+                    switch (key) {
                     case Qt.Key_Escape:
                         root.watching = false
                         event.accepted = true
@@ -1093,7 +1121,7 @@ Window {
                     }
                     const ap = playerView.activePlayer
                     if (!ap) return
-                    switch (event.key) {
+                    switch (key) {
                     case Qt.Key_R:
                         playerView.togglePanel("related"); break
                     case Qt.Key_C:

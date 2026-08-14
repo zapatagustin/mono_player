@@ -81,6 +81,11 @@ position, like a statusline.
 hjkl are first-class; arrows are an alias, never the reverse. Single keys, no
 chords, no modifier for app-level actions. `Esc` always steps back one level.
 
+Bindings are positional: they resolve by physical key position (QWERTY spots,
+via scan codes), not by the symbol the active layout produces — under dvorak
+or any other layout, hjkl stay on the home row. Text prompts still type in
+the real layout. Key names in the tables below mean the QWERTY position.
+
 ### Browse (normal mode)
 
 | Key | Action |
