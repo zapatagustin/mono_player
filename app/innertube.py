@@ -831,6 +831,22 @@ async def add_to_playlist(client, bearer: str, video_id: str,
     return resp.json().get("status") == "STATUS_SUCCEEDED"
 
 
+async def remove_from_playlist(client, bearer: str, video_id: str,
+                               playlist_id: str) -> bool:
+    resp = await client.post(
+        EDIT_PLAYLIST_URL,
+        json={
+            "context": _account_context(),
+            "playlistId": playlist_id,
+            "actions": [{"action": "ACTION_REMOVE_VIDEO_BY_VIDEO_ID",
+                         "removedVideoId": video_id}],
+        },
+        headers=_account_headers(bearer),
+    )
+    resp.raise_for_status()
+    return resp.json().get("status") == "STATUS_SUCCEEDED"
+
+
 async def like(client, bearer: str, video_id: str) -> bool:
     resp = await client.post(
         LIKE_URL,

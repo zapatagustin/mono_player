@@ -276,6 +276,12 @@ Window {
                                              root.notify("added to watch later") }
                         else root.notify("login required (gl)")
                         break
+                    case Qt.Key_D:  // remove from the playlist being viewed
+                        if (!cur) break
+                        if (feed.contextPlaylistId !== "")
+                            feed.removeFromPlaylist(cur.videoId)
+                        else root.notify("not a playlist of yours")
+                        break
                     case Qt.Key_Slash:
                         root.promptKind = "search"; root.prompting = true; break
                     case Qt.Key_S:  // shift+s: subscribe (cell's channel,
@@ -431,7 +437,7 @@ Window {
 
                 property int activeTabId: -1
                 property var activePlayer: null
-                property string panelMode: ""  // "" | "related" | "comments"
+                property string panelMode: ""  // "" | related|comments|playlist|queue
 
                 function togglePanel(mode) {
                     if (panelMode === mode) {
@@ -656,7 +662,9 @@ Window {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
                                 verticalAlignment: Text.AlignVCenter
-                                text: playerView.panelMode === "playlist"
+                                text: playerView.panelMode === "queue"
+                                    ? "queue (" + queueList.count + ")"
+                                    : playerView.panelMode === "playlist"
                                     ? (picker.loading ? "save to — loading…"
                                        : "save to playlist")
                                     : playerView.panelMode === "comments"
@@ -710,6 +718,50 @@ Window {
                                         plList.currentIndex = plCell.index
                                         picker.save(plCell.index)
                                         playerView.panelMode = ""
+                                    }
+                                }
+                            }
+                        }
+
+                        ListView {
+                            id: queueList
+                            width: parent.width
+                            height: parent.height - th.barHeight
+                            visible: playerView.panelMode === "queue"
+                            clip: true
+                            model: tabs.queueModel
+                            currentIndex: 0
+                            boundsBehavior: Flickable.StopAtBounds
+                            highlightMoveDuration: 0
+                            highlightMoveVelocity: -1
+
+                            delegate: Rectangle {
+                                id: qCell
+                                required property string title
+                                required property bool current
+                                required property int index
+                                readonly property bool sel:
+                                    ListView.isCurrentItem
+                                width: queueList.width
+                                height: 36
+                                color: sel ? th.accent : "transparent"
+
+                                Text {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: (qCell.current ? "▶ " : "  ")
+                                          + qCell.title
+                                    color: qCell.sel ? th.accentFg
+                                        : qCell.current ? th.fg : th.fgDim
+                                    font.pixelSize: th.fontSize
+                                    elide: Text.ElideRight
+                                }
+                                TapHandler {
+                                    onTapped: {
+                                        queueList.currentIndex = qCell.index
+                                        tabs.jumpToQueueItem(qCell.index)
                                     }
                                 }
                             }
@@ -939,12 +991,20 @@ Window {
                         const mode = playerView.panelMode
                         const isRel = mode === "related"
                         const list = isRel ? relList
-                            : mode === "comments" ? commList : plList
+                            : mode === "comments" ? commList
+                            : mode === "queue" ? queueList : plList
                         const it = isRel && list.currentIndex >= 0
                             && list.currentIndex < related.items.length
                             ? related.items[list.currentIndex] : null
                         switch (event.key) {
                         case Qt.Key_J: case Qt.Key_Down:
+                            // Shift+J in the queue panel: move item down.
+                            if (mode === "queue"
+                                    && (event.modifiers & Qt.ShiftModifier)) {
+                                if (tabs.moveQueueItem(list.currentIndex, 1))
+                                    list.currentIndex += 1
+                                event.accepted = true; return
+                            }
                             list.currentIndex = Math.min(
                                 list.count - 1, list.currentIndex + 1)
                             if (mode === "comments" && comments.hasMore
@@ -952,14 +1012,26 @@ Window {
                                 comments.loadMore()
                             event.accepted = true; return
                         case Qt.Key_K: case Qt.Key_Up:
+                            if (mode === "queue"
+                                    && (event.modifiers & Qt.ShiftModifier)) {
+                                if (tabs.moveQueueItem(list.currentIndex, -1))
+                                    list.currentIndex -= 1
+                                event.accepted = true; return
+                            }
                             list.currentIndex = Math.max(
                                 0, list.currentIndex - 1)
+                            event.accepted = true; return
+                        case Qt.Key_D:
+                            if (mode === "queue")
+                                tabs.removeQueueItem(list.currentIndex)
                             event.accepted = true; return
                         case Qt.Key_Return: case Qt.Key_Enter:
                             if (isRel) {
                                 if (it) tabs.playVideo(it.videoId, it.title)
                             } else if (mode === "comments") {
                                 comments.toggleReplies(commList.currentIndex)
+                            } else if (mode === "queue") {
+                                tabs.jumpToQueueItem(list.currentIndex)
                             } else {
                                 picker.save(plList.currentIndex)
                                 playerView.panelMode = ""
@@ -990,6 +1062,9 @@ Window {
                             event.accepted = true; return
                         case Qt.Key_B:
                             playerView.togglePanel("playlist")
+                            event.accepted = true; return
+                        case Qt.Key_U:
+                            playerView.togglePanel("queue")
                             event.accepted = true; return
                         case Qt.Key_L:
                             if (mode === "comments"
@@ -1030,6 +1105,8 @@ Window {
                         playerView.togglePanel("comments"); break
                     case Qt.Key_B:
                         playerView.togglePanel("playlist"); break
+                    case Qt.Key_U:
+                        playerView.togglePanel("queue"); break
                     case Qt.Key_Space: ap.togglePause(); break
                     case Qt.Key_H: case Qt.Key_Left:
                         ap.cmd(["seek", -5]); break

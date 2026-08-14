@@ -9,6 +9,7 @@ import time
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
+    QObject,
     Property,
     Qt,
     QTimer,
@@ -55,6 +56,71 @@ class _LivePlayer:
         self.retried = False  # one automatic retry per user-initiated load
 
 
+class QueueModel(QAbstractListModel):
+    """The ACTIVE tab's queue for the watch-view queue panel. Mutations
+    while visible are granular (move/remove/insert/current); switching
+    tabs or replacing the queue resets."""
+
+    TITLE, CURRENT = range(Qt.ItemDataRole.UserRole + 1,
+                           Qt.ItemDataRole.UserRole + 3)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._items: list[QueueItem] = []
+        self._current = -1
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._items)
+
+    def roleNames(self):
+        return {self.TITLE: b"title", self.CURRENT: b"current"}
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self._items):
+            return None
+        if role == self.TITLE:
+            return self._items[index.row()].title
+        if role == self.CURRENT:
+            return index.row() == self._current
+        return None
+
+    def reset(self, items: list[QueueItem], current: int):
+        self.beginResetModel()
+        self._items = list(items)
+        self._current = current
+        self.endResetModel()
+
+    def insert_row(self, pos: int, item: QueueItem):
+        self.beginInsertRows(QModelIndex(), pos, pos)
+        self._items.insert(pos, item)
+        if pos <= self._current:
+            self._current += 1
+        self.endInsertRows()
+
+    def move_row(self, frm: int, to: int):
+        # beginMoveRows destination: the row BEFORE which the item lands.
+        dest = to + 1 if to > frm else to
+        if not self.beginMoveRows(QModelIndex(), frm, frm, QModelIndex(),
+                                  dest):
+            return
+        self._items.insert(to, self._items.pop(frm))
+        self.endMoveRows()
+
+    def remove_row(self, pos: int):
+        self.beginRemoveRows(QModelIndex(), pos, pos)
+        self._items.pop(pos)
+        if pos < self._current:
+            self._current -= 1
+        self.endRemoveRows()
+
+    def set_current(self, idx: int):
+        old, self._current = self._current, idx
+        for row in (old, idx):
+            if 0 <= row < len(self._items):
+                mi = self.index(row)
+                self.dataChanged.emit(mi, mi, [self.CURRENT])
+
+
 class TabManager(QAbstractListModel):
     createPlayer = Signal(int)
     destroyPlayer = Signal(int)
@@ -81,6 +147,8 @@ class TabManager(QAbstractListModel):
         # No autoplay on startup: restored tabs get a player on first click.
         self._live: dict[int, _LivePlayer] = {}
         self._loading_since: float | None = None  # time-to-first-frame probe
+        self._queue_model = QueueModel(self)
+        self._sync_queue_model()
 
     # --- QAbstractListModel ---
 
@@ -106,6 +174,11 @@ class TabManager(QAbstractListModel):
 
     activeIndex = Property(int, _get_active_index, notify=activeIndexChanged)
 
+    def _get_queue_model(self):
+        return self._queue_model
+
+    queueModel = Property(QObject, _get_queue_model, constant=True)
+
     # --- invokables ---
 
     @Slot(str, str)
@@ -119,6 +192,7 @@ class TabManager(QAbstractListModel):
             tab = self._tabs[self._active]
             self._store.set_queue(tab.id, queue)
             self._update_tab(self._active, Tab(tab.id, queue, 0, 0.0))
+            self._sync_queue_model()
         self._materialize_active()
 
     @Slot(str, str)
@@ -181,7 +255,7 @@ class TabManager(QAbstractListModel):
         if not self._tabs:
             self._set_active(-1)
             return
-        self._set_active(min(row, len(self._tabs) - 1))
+        self._set_active(min(row, len(self._tabs) - 1), force=True)
         new_tab = self._tabs[self._active]
         if new_tab.id in self._live:
             self._live[new_tab.id].last_active = self._now()
@@ -221,6 +295,7 @@ class TabManager(QAbstractListModel):
             self._update_tab(row, Tab(tab.id, tab.queue, idx, 0.0))
             self._store.save_state(tab.id, idx, 0.0)
             if row == self._active:
+                self._queue_model.set_current(idx)
                 self._emit_current_video()
 
     @Slot(int, str)
@@ -252,6 +327,90 @@ class TabManager(QAbstractListModel):
         live.retried = True
         if row == self._active:
             self._materialize_active(use_cache=False, is_retry=True)
+
+    # --- queue panel ops (active tab only) ---
+
+    @Slot(int, int, result=bool)
+    def moveQueueItem(self, idx: int, delta: int) -> bool:
+        """Swap a FUTURE queue item with its neighbour. The current and
+        past items stay put: they are not (or not correctly) addressable
+        in the mpv playlist, and moving history is pointless. Returns
+        whether the move happened (the panel selection follows it)."""
+        tab, live = self._active_tab()
+        if tab is None or delta not in (-1, 1):
+            return False
+        to = idx + delta
+        if not (tab.queue_idx < idx < len(tab.queue)
+                and tab.queue_idx < to < len(tab.queue)):
+            return False
+        queue = list(tab.queue)
+        queue.insert(to, queue.pop(idx))
+        self._store.update_queue(tab.id, queue)
+        self._update_tab(self._active,
+                         Tab(tab.id, queue, tab.queue_idx, tab.position_secs))
+        self._queue_model.move_row(idx, to)
+        if live is not None:
+            frm = idx - live.offset
+            # mpv playlist-move targets the entry whose place is taken:
+            # moving down needs from+2, moving up from-1.
+            self.mpvCommandFor.emit(
+                tab.id, ["playlist-move", frm, frm + 2 if delta > 0 else frm - 1])
+        return True
+
+    @Slot(int)
+    def removeQueueItem(self, idx: int):
+        """Drop any queue item except the one playing."""
+        tab, live = self._active_tab()
+        if tab is None or not 0 <= idx < len(tab.queue) \
+                or idx == tab.queue_idx:
+            return
+        queue = list(tab.queue)
+        queue.pop(idx)
+        new_idx = tab.queue_idx - (1 if idx < tab.queue_idx else 0)
+        self._store.update_queue(tab.id, queue)
+        if new_idx != tab.queue_idx:
+            self._store.save_state(tab.id, new_idx, tab.position_secs)
+        self._update_tab(self._active,
+                         Tab(tab.id, queue, new_idx, tab.position_secs))
+        self._queue_model.remove_row(idx)
+        if live is not None:
+            if idx >= live.offset:
+                self.mpvCommandFor.emit(
+                    tab.id, ["playlist-remove", idx - live.offset])
+            else:
+                # Item predates the materialization: mpv never had it,
+                # only the queue->mpv offset shifts.
+                live.offset -= 1
+
+    @Slot(int)
+    def jumpToQueueItem(self, idx: int):
+        tab, live = self._active_tab()
+        if tab is None or not 0 <= idx < len(tab.queue) \
+                or idx == tab.queue_idx:
+            return
+        if live is not None and idx >= live.offset:
+            # In the mpv playlist: play it there; the playlist-pos
+            # observer brings queue_idx along.
+            self.mpvCommandFor.emit(
+                tab.id, ["playlist-play-index", idx - live.offset])
+        else:
+            # Before the offset (or tab frozen): re-materialize from it.
+            self._update_tab(self._active, Tab(tab.id, tab.queue, idx, 0.0))
+            self._store.save_state(tab.id, idx, 0.0)
+            self._materialize_active()
+
+    def _active_tab(self):
+        if self._active < 0:
+            return None, None
+        tab = self._tabs[self._active]
+        return tab, self._live.get(tab.id)
+
+    def _sync_queue_model(self):
+        tab, _ = self._active_tab()
+        if tab is None:
+            self._queue_model.reset([], -1)
+        else:
+            self._queue_model.reset(tab.queue, tab.queue_idx)
 
     @Slot()
     def persistActive(self):
@@ -343,12 +502,14 @@ class TabManager(QAbstractListModel):
         tab = self._tabs[self._active]
         queue = list(tab.queue)
         pos = len(queue) if at_end else min(tab.queue_idx + 1, len(queue))
-        queue.insert(pos, QueueItem(video_id, title))
+        item = QueueItem(video_id, title)
+        queue.insert(pos, item)
         self._store.update_queue(tab.id, queue)
         self._update_tab(
             self._active,
             Tab(tab.id, queue, tab.queue_idx, tab.position_secs),
         )
+        self._queue_model.insert_row(pos, item)
         live = self._live.get(tab.id)
         if live is not None:
             flag = "append" if at_end else "insert-next"
@@ -370,12 +531,15 @@ class TabManager(QAbstractListModel):
         idx = self.index(row)
         self.dataChanged.emit(idx, idx, [TITLE])
 
-    def _set_active(self, row: int):
-        if row == self._active:
+    def _set_active(self, row: int, force: bool = False):
+        # `force` covers closing the active tab when the successor lands
+        # on the same row index: the row is equal but the tab is not.
+        if row == self._active and not force:
             return
         self._active = row
         self._store.set_active(self._tabs[row].id if row >= 0 else None)
         self.activeIndexChanged.emit()
+        self._sync_queue_model()
         if len(self._tabs):
             self.dataChanged.emit(
                 self.index(0), self.index(len(self._tabs) - 1), [ACTIVE]

@@ -99,6 +99,7 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `gh` / `gy` / `gp` | personalized home / history / playlists (login required) |
 | `ga` | cycle the acting YouTube channel (brand accounts); statusline shows `as <name>` |
 | `gl` | sign in (email prompt, then webview) — or sign out when logged in |
+| `d` | remove selected video from the playlist being viewed (`gw`/`gp` feeds) |
 | `x` | close active tab |
 | `q` | quit |
 
@@ -115,6 +116,7 @@ chords, no modifier for app-level actions. `Esc` always steps back one level.
 | `C` | write a comment (prompt; posts as the acting channel) |
 | `b` | save to playlist (panel picker; ✓ marks playlists that already have it) |
 | `r` / `c` | related / comments side panel (j/k navigate, enter acts) |
+| `u` | queue side panel: j/k navigate, `J`/`K` move item down/up, `d` remove, enter jumps (only upcoming items move) |
 | `f` | fullscreen |
 | `1`–`9`, `gt`/`gT`, `x` | tab actions, same as browse |
 | `Esc` | back to browse (tab keeps playing) |

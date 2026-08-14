@@ -369,6 +369,143 @@ def test_fresh_load_retry():
     print("fresh load retry: ok")
 
 
+def queue_titles(m):
+    qm = m.queueModel
+    return [qm.data(qm.index(i), qm.TITLE) for i in range(qm.rowCount())]
+
+
+def current_row(m):
+    qm = m.queueModel
+    return next((i for i in range(qm.rowCount())
+                 if qm.data(qm.index(i), qm.CURRENT)), -1)
+
+
+def test_queue_ops():
+    # Live tab, offset 0: queue idx == mpv playlist index.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        m = make_manager(store)
+        ev = collect(m)
+        resets = []
+        m.queueModel.modelReset.connect(lambda: resets.append(1))
+
+        m.playVideo("aaaaaaaaaaa", "A")
+        t1 = store.load()[0][0].id
+        for vid, title in [("bbbbbbbbbbb", "B"), ("ccccccccccc", "C"),
+                           ("ddddddddddd", "D")]:
+            m.enqueue(vid, title)
+        assert queue_titles(m) == ["A", "B", "C", "D"]
+        assert current_row(m) == 0
+
+        # Move down / up: sqlite + model + mpv playlist-move (target entry
+        # semantics: down = from+2, up = from-1).
+        ev.clear()
+        resets.clear()
+        m.moveQueueItem(1, 1)
+        assert queue_titles(m) == ["A", "C", "B", "D"]
+        assert ev == [("cmd", t1, ["playlist-move", 1, 3])]
+        ev.clear()
+        m.moveQueueItem(2, -1)
+        assert queue_titles(m) == ["A", "B", "C", "D"]
+        assert ev == [("cmd", t1, ["playlist-move", 2, 1])]
+
+        # Rejected: the current item, targets at/before it, out of bounds.
+        ev.clear()
+        for idx, delta in [(0, 1), (1, -1), (3, 1), (-1, 1), (9, 1)]:
+            m.moveQueueItem(idx, delta)
+        assert queue_titles(m) == ["A", "B", "C", "D"]
+        assert ev == []
+
+        # Remove a future item; the current one is refused.
+        m.removeQueueItem(2)
+        assert queue_titles(m) == ["A", "B", "D"]
+        assert ev == [("cmd", t1, ["playlist-remove", 2])]
+        ev.clear()
+        m.removeQueueItem(0)
+        assert queue_titles(m) == ["A", "B", "D"]
+        assert ev == []
+
+        # All in-place mutations were granular: zero model resets.
+        assert resets == []
+
+        # Jump: command only; queue_idx follows via the mpv observer.
+        m.jumpToQueueItem(1)
+        assert ev == [("cmd", t1, ["playlist-play-index", 1])]
+        m.playlistPos(t1, 1)
+        assert store.load()[0][0].queue_idx == 1
+        assert current_row(m) == 1
+
+    # Restored tab materialized at queue_idx 1: offset maps queue<->mpv.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        tid = store.create([QueueItem("aaaaaaaaaaa", "A"),
+                            QueueItem("bbbbbbbbbbb", "B"),
+                            QueueItem("ccccccccccc", "C")])
+        store.save_state(tid, 1, 0.0)
+        store.set_active(tid)
+        m = make_manager(store)
+        ev = collect(m)
+        m.activate(0)  # offset 1: mpv playlist = [B, C]
+        m.enqueue("ddddddddddd", "D")  # mpv playlist = [B, C, D]
+        ev.clear()
+
+        m.moveQueueItem(2, 1)  # C after D: mpv from 1, down -> target 3
+        assert queue_titles(m) == ["A", "B", "D", "C"]
+        assert ev == [("cmd", tid, ["playlist-move", 1, 3])]
+        ev.clear()
+
+        # Removing a PAST item (before the offset): sqlite only, the mpv
+        # playlist never contained it; queue_idx and offset shift down.
+        m.removeQueueItem(0)
+        assert queue_titles(m) == ["B", "D", "C"]
+        assert store.load()[0][0].queue_idx == 0
+        assert current_row(m) == 0
+        assert ev == []
+
+        # After the shift the queue<->mpv mapping must still line up.
+        m.removeQueueItem(1)  # D: mpv index 1 now that offset is 0
+        assert queue_titles(m) == ["B", "C"]
+        assert ev == [("cmd", tid, ["playlist-remove", 1])]
+        m.playlistPos(tid, 1)
+        assert store.load()[0][0].queue_idx == 1
+        assert current_row(m) == 1
+
+    # Frozen active tab (restored, never activated): sqlite only, no player.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        tid = store.create([QueueItem("aaaaaaaaaaa", "A"),
+                            QueueItem("bbbbbbbbbbb", "B"),
+                            QueueItem("ccccccccccc", "C")])
+        store.set_active(tid)
+        m = make_manager(store)
+        ev = collect(m)
+        m.moveQueueItem(1, 1)
+        m.removeQueueItem(1)
+        tabs, _ = store.load()
+        assert [q.title for q in tabs[0].queue] == ["A", "B"]
+        assert ev == []
+    print("queue ops: ok")
+
+
+def test_close_active_tab_persists_successor():
+    # Closing the active tab when the successor lands on the SAME row
+    # index must still persist the new active id (regression: _set_active
+    # early-returned on equal row, leaving sqlite pointing at the deleted
+    # tab — session restore then lost the active tab entirely).
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        m = make_manager(store)
+        m.playVideo("aaaaaaaaaaa", "A")
+        m.openInNewTab("bbbbbbbbbbb", "B")
+        m.activate(0)
+        m.closeTab(0)  # successor (B) is now row 0 == old active row
+        tabs, active = store.load()
+        assert [t.id for t in tabs] == [tabs[0].id]
+        assert active == tabs[0].id
+        assert queue_titles(m) == ["B"]
+    print("close active tab persists successor: ok")
+
+
 if __name__ == "__main__":
     test_store()
     test_materialize()
@@ -380,4 +517,6 @@ if __name__ == "__main__":
     test_enqueue_playnext()
     test_resolved_url_cache()
     test_fresh_load_retry()
+    test_queue_ops()
+    test_close_active_tab_persists_successor()
     print("all checks passed")

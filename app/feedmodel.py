@@ -37,6 +37,7 @@ class FeedModel(QAbstractListModel):
         self._auth = auth
         self._context_label = ""
         self._context_channel_id = ""
+        self._context_playlist_id = ""
         self._thumbs: dict[str, str] = {}  # video_id -> local file URL
         self._pending: set[str] = set()
         # Cold start: paint the cached feed before any network.
@@ -184,21 +185,27 @@ class FeedModel(QAbstractListModel):
             print(f"feed: subscribe failed: {exc!r}")
             self.message.emit("subscribe failed")
 
-    def _set_context(self, label: str, channel_id: str = ""):
+    def _set_context(self, label: str, channel_id: str = "",
+                     playlist_id: str = ""):
         self._context_label = label
         self._context_channel_id = channel_id
+        self._context_playlist_id = playlist_id
         self.contextChanged.emit()
 
     contextLabel = Property(str, lambda s: s._context_label,
                             notify=contextChanged)
     contextChannelId = Property(str, lambda s: s._context_channel_id,
                                 notify=contextChanged)
+    # Non-empty only when the feed IS one of the account's own playlists
+    # (watch later, or a playlist opened from gp) — gates removal.
+    contextPlaylistId = Property(str, lambda s: s._context_playlist_id,
+                                 notify=contextChanged)
 
     @Slot()
     def loadWatchLater(self):
         if self._auth is not None:
             asyncio.create_task(self._load_account_feed(
-                innertube.watch_later, "watch later"))
+                innertube.watch_later, "watch later", playlist_id="WL"))
 
     @Slot()
     def loadHome(self):
@@ -225,12 +232,21 @@ class FeedModel(QAbstractListModel):
         if playlist_id and self._auth is not None:
             asyncio.create_task(self._load_account_feed(
                 lambda c, b: innertube.playlist_videos(c, b, playlist_id),
-                "playlist"))
+                "playlist", playlist_id=playlist_id))
 
     @Slot(str)
     def addToWatchLater(self, video_id: str):
         if self._auth is not None:
             asyncio.create_task(self._add_watch_later(video_id))
+
+    @Slot(str)
+    def removeFromPlaylist(self, video_id: str):
+        """Remove a video from the playlist the feed is showing (gated by
+        contextPlaylistId); the cell drops locally on success."""
+        if self._auth is not None and self._context_playlist_id:
+            asyncio.create_task(
+                self._remove_from_playlist(video_id,
+                                           self._context_playlist_id))
 
     # --- async internals ---
 
@@ -247,7 +263,8 @@ class FeedModel(QAbstractListModel):
     async def _load_subscriptions(self):
         await self._load_account_feed(innertube.subscriptions, "subscriptions")
 
-    async def _load_account_feed(self, fetch, label: str):
+    async def _load_account_feed(self, fetch, label: str,
+                                 playlist_id: str = ""):
         bearer = await self._auth.bearer()
         if bearer is None:
             print(f"feed: {label} needs login")
@@ -259,7 +276,7 @@ class FeedModel(QAbstractListModel):
             return
         print(f"feed: {len(videos)} {label} videos")
         self._set_videos(videos)
-        self._set_context(label)
+        self._set_context(label, playlist_id=playlist_id)
 
     async def _add_watch_later(self, video_id: str):
         bearer = await self._auth.bearer()
@@ -271,6 +288,31 @@ class FeedModel(QAbstractListModel):
             print(f"feed: watch later add {video_id}: {'ok' if ok else 'failed'}")
         except Exception as exc:
             print(f"feed: watch later add failed: {exc!r}")
+
+    async def _remove_from_playlist(self, video_id: str, playlist_id: str):
+        bearer = await self._auth.bearer()
+        if bearer is None:
+            self.message.emit("login required (gl)")
+            return
+        try:
+            ok = await innertube.remove_from_playlist(
+                self._client, bearer, video_id, playlist_id)
+        except Exception as exc:
+            print(f"feed: playlist remove failed: {exc!r}")
+            ok = False
+        if not ok:
+            self.message.emit("remove failed")
+            return
+        # Stale-context guard: the user may have navigated away while the
+        # request was in flight — only drop the cell if it's still here.
+        row = next((i for i, v in enumerate(self._videos)
+                    if v.video_id == video_id), None)
+        if row is not None:
+            self.beginRemoveRows(QModelIndex(), row, row)
+            self._videos.pop(row)
+            self.endRemoveRows()
+            self._store.save(self._videos)
+        self.message.emit("removed")
 
     def _set_videos(self, videos):
         self.beginResetModel()
