@@ -8,7 +8,30 @@
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
 
-      python = pkgs.python313.withPackages (ps: with ps; [
+      # yt-dlp pinned to nightly: YouTube 403-enforces stale player clients
+      # (SABR/PO-token rollout); stable 2026.07.04 lacks the visionos client
+      # and a month of client-version updates. Interpreter-level override so
+      # bgutil-ytdlp-pot-provider's propagated dependency is the same drv.
+      # Re-point rev+hash at the current nightly (yt-dlp-nightly-builds
+      # release body names the commit) whenever loads start 403ing again;
+      # drop the override once a stable release catches up in nixpkgs.
+      python313 = pkgs.python313.override {
+        packageOverrides = _: prev: {
+          yt-dlp = prev.yt-dlp.overridePythonAttrs (_: {
+            # master's version.py still carries the last stable string and
+            # the metadata check requires a match; the src rev is what counts.
+            version = "2026.7.4";
+            src = pkgs.fetchFromGitHub {
+              owner = "yt-dlp";
+              repo = "yt-dlp";
+              rev = "5d6b8c8cd19785c3086ae3a9ec618c45e25eb3bc";
+              hash = "sha256:17wf454dpplgqsxmn58hsg7vkw627lws4q0k2pv2af50b434scml";
+            };
+          });
+        };
+      };
+
+      python = python313.withPackages (ps: with ps; [
         pyside6 # Qt Quick UI
         yt-dlp # binary, consumed by mpv's ytdl_hook (this env's bin wins PATH)
         # PO token plugin (auto-discovered by yt-dlp via sys.path) + the Node
