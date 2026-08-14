@@ -17,7 +17,7 @@ from PySide6.QtCore import (
 import innertube
 
 _ROLE_KEYS = ("author", "text", "likes", "published", "replies", "depth",
-              "hasReplies", "expanded", "avatar", "liked")
+              "hasReplies", "expanded", "avatar", "liked", "isMore")
 _ROLES = {Qt.ItemDataRole.UserRole + 1 + i: key
           for i, key in enumerate(_ROLE_KEYS)}
 
@@ -36,6 +36,19 @@ def _to_item(comment, depth: int) -> dict:
         "id": comment.comment_id,
         "hasReplies": comment.reply_token != "" or (
             depth == 0 and comment.replies != ""),
+        "isMore": False,
+        "moreToken": "",
+    }
+
+
+def _more_item(token: str) -> dict:
+    """Synthetic depth-1 row trailing a reply block: enter loads the next
+    replies page."""
+    return {
+        "author": "", "text": "", "likes": "", "published": "", "replies": "",
+        "depth": 1, "replyToken": "", "expanded": False, "avatar": "",
+        "likeAction": "", "unlikeAction": "", "liked": False, "id": "",
+        "hasReplies": False, "isMore": True, "moreToken": token,
     }
 
 
@@ -182,6 +195,9 @@ class CommentsModel(QAbstractListModel):
         if not 0 <= index < len(self._items):
             return
         item = self._items[index]
+        if item["isMore"]:
+            await self._more_replies(index)
+            return
         if item["depth"] != 0 or not item["hasReplies"]:
             return
         if not item["replyToken"]:
@@ -203,29 +219,73 @@ class CommentsModel(QAbstractListModel):
             self._row_changed(index)
             return
         token = item["replyToken"]
-        replies = self._reply_cache.get(token)
-        if replies is None:
+        cached = self._reply_cache.get(token)
+        if cached is None:
             video_id = self._video_id
             self._set_loading(True)
             bearer = (await self._auth.bearer()
                       if self._auth is not None else None)
             try:
-                replies, _ = await self._page(self._client, token, bearer)
+                cached = await self._page(self._client, token, bearer)
             except Exception as exc:
                 print(f"comments: replies failed: {exc!r}")
-                replies = []
-            self._reply_cache[token] = replies
+                cached = ([], "")
+            self._reply_cache[token] = cached
             self._set_loading(False)
             if video_id != self._video_id:
                 return
-        if replies:
-            self.beginInsertRows(QModelIndex(), index + 1,
-                                 index + len(replies))
-            self._items[index + 1:index + 1] = [_to_item(c, 1)
-                                                for c in replies]
+        replies, next_token = cached
+        rows = [_to_item(c, 1) for c in replies]
+        if next_token:
+            rows.append(_more_item(next_token))
+        if rows:
+            self.beginInsertRows(QModelIndex(), index + 1, index + len(rows))
+            self._items[index + 1:index + 1] = rows
             self.endInsertRows()
         item["expanded"] = True
         self._row_changed(index)
+
+    async def _more_replies(self, index: int):
+        """Enter on a more-row: fetch the next replies page, insert it in
+        place, and advance or drop the row."""
+        item = self._items[index]
+        token = item["moreToken"]
+        video_id = self._video_id
+        self._set_loading(True)
+        bearer = (await self._auth.bearer()
+                  if self._auth is not None else None)
+        try:
+            more, next_token = await self._page(self._client, token, bearer)
+        except Exception as exc:
+            print(f"comments: more replies failed: {exc!r}")
+            self._set_loading(False)
+            return
+        self._set_loading(False)
+        if video_id != self._video_id or index >= len(self._items) \
+                or self._items[index] is not item:
+            return
+        # Accumulate into the thread's cache so re-expansion replays it all.
+        parent_row = index - 1
+        while parent_row >= 0 and self._items[parent_row]["depth"] != 0:
+            parent_row -= 1
+        if parent_row >= 0:
+            parent_token = self._items[parent_row]["replyToken"]
+            prev = self._reply_cache.get(parent_token)
+            if prev is not None:
+                self._reply_cache[parent_token] = (prev[0] + list(more),
+                                                   next_token)
+        if more:
+            self.beginInsertRows(QModelIndex(), index,
+                                 index + len(more) - 1)
+            self._items[index:index] = [_to_item(c, 1) for c in more]
+            self.endInsertRows()
+            index += len(more)
+        if next_token:
+            item["moreToken"] = next_token
+        else:
+            self.beginRemoveRows(QModelIndex(), index, index)
+            del self._items[index]
+            self.endRemoveRows()
 
     async def _fill_reply_tokens(self):
         video_id = self._video_id

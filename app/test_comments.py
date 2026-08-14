@@ -152,7 +152,11 @@ def test_comments_model():
     async def fetch_page(client, token, bearer=None):
         calls.append(token)
         if token == "RTOK":
-            return ([Comment("@r", "a reply", "", "now", "", "r1", "")], "")
+            return ([Comment("@r", "a reply", "", "now", "", "r1", "")],
+                    "RMORE")
+        if token == "RMORE":
+            return ([Comment("@r2", "later reply", "", "now", "", "r2", "")],
+                    "")
         return ([Comment("@b", "more", "", "now", "", "c2", "")], "")
 
     class FakeAuth:
@@ -177,21 +181,30 @@ def test_comments_model():
     assert not m.hasMore  # second page returned no token
 
     # Reply expansion with no token: the anonymous WEB listing is fetched
-    # once to map commentId -> reply token, then the replies load.
+    # once to map commentId -> reply token, then the replies load. A further
+    # replies page exists, so a "more replies" row trails the block.
     asyncio.run(m._toggle(0))
     assert ("aaaaaaaaaaa", None) in calls  # anonymous refetch happened
     assert calls[-1] == "RTOK"
-    assert [(i["author"], i["depth"]) for i in m.items] == [
-        ("@a", 0), ("@r", 1), ("@b", 0)]
+    assert [(i["author"], i["depth"], i["isMore"]) for i in m.items] == [
+        ("@a", 0, False), ("@r", 1, False), ("", 1, True), ("@b", 0, False)]
     assert m.items[0]["expanded"]
 
-    # Collapse removes them; re-expand hits the reply cache, no refetch.
+    # Enter on the more-row loads the next replies page inline and, with
+    # the thread exhausted, removes the row.
+    asyncio.run(m._toggle(2))
+    assert calls[-1] == "RMORE"
+    assert [(i["author"], i["depth"]) for i in m.items] == [
+        ("@a", 0), ("@r", 1), ("@r2", 1), ("@b", 0)]
+
+    # Collapse removes the whole block; re-expand replays the accumulated
+    # cache (both pages, no more-row, no refetch).
     asyncio.run(m._toggle(0))
     assert [i["author"] for i in m.items] == ["@a", "@b"]
     n = len(calls)
     asyncio.run(m._toggle(0))
     assert len(calls) == n
-    assert [i["author"] for i in m.items] == ["@a", "@r", "@b"]
+    assert [i["author"] for i in m.items] == ["@a", "@r", "@r2", "@b"]
 
     # Avatar and like action ride the items.
     assert m.items[0]["avatar"] == "https://a/a.jpg"

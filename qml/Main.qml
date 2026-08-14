@@ -747,11 +747,22 @@ Window {
                                 required property bool expanded
                                 required property string avatar
                                 required property bool liked
+                                required property bool isMore
                                 readonly property bool sel:
                                     ListView.isCurrentItem
                                 width: commList.width
-                                height: commCol.implicitHeight + 12
+                                height: isMore ? 30 : commCol.implicitHeight + 12
                                 color: sel ? th.bg1 : "transparent"
+
+                                // Synthetic row: loads the next replies page.
+                                Text {
+                                    x: 10 + commCell.depth * 18
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: commCell.isMore
+                                    text: "▸ more replies (enter)"
+                                    color: th.fgDim
+                                    font.pixelSize: th.fontSizeSmall
+                                }
 
                                 // Long text blocks mark selection with an
                                 // accent edge instead of a full accent fill.
@@ -763,6 +774,7 @@ Window {
                                 }
                                 Column {
                                     id: commCol
+                                    visible: !commCell.isMore
                                     // Explicit geometry from the ListView's
                                     // stable width — anchoring to the parent
                                     // (whose height depends on this column's
