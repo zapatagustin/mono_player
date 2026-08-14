@@ -190,9 +190,7 @@ End-to-end confirmed: real 4K60 AV1 from YouTube plays with
   it; software dav1d at 4K+ is a stutter generator, and blind AV1 requests
   would make us slower than Chrome on half the machines.
   #+begin_example
-  current (iHD AV1 race, see Known debts):
-                bv*[vcodec^=vp9][height<=?4320]+ba/bv*+ba/b
-  target, once the driver survives --stress:
+  current (AV1-first, re-preferred 2026-08-14 after 65 clean --stress cycles):
                 bv*[vcodec^=av01][height<=?4320]+ba/bv*[vcodec^=vp9]+ba/b
   #+end_example
 - 8K on an iGPU is "exposed" but bandwidth-bound; the practical ceiling on
@@ -244,11 +242,13 @@ End-to-end confirmed: real 4K60 AV1 from YouTube plays with
   zero-copy vaapi, tab-switch decoder teardown segfaults inside
   =iHD_drv_video.so= while mpv's render thread maps an in-flight frame
   (=vaSyncSurface= in =mapper_map=). AV1 hits it fastest but VP9 crashed
-  too. Mitigated app-side, not fixed: VP9-first format string + =stop= then
-  a 150ms drain before materializing loadfiles (=TabManager=). 49 stress
-  cycles clean vs crash-at-3 before. =MONO_HWDEC=vaapi-copy= is the fully
-  stable fallback (~2.3x decode CPU). Re-test with =--stress= after any
-  intel-media-driver or mpv bump; re-prefer AV1 when it survives.
+  too. Mitigated app-side, not fixed: =stop= then a 150ms drain before
+  materializing loadfiles (=TabManager=). 2026-08-14: AV1-first re-tested
+  with the drain in place — 65 stress cycles clean (crash-at-3 baseline),
+  driver still 26.2.4, so the drain alone suffices; AV1 re-preferred, the
+  VP9-first belt removed. =MONO_HWDEC=vaapi-copy= is the fully stable
+  fallback (~2.3x decode CPU). Re-run =--stress= after any
+  intel-media-driver or mpv bump.
 - SABR/UMP: YouTube is moving stream delivery to a server-driven binary
   protocol; yt-dlp's SABR downloader was still in test mid-2026. This is
   yt-dlp's problem by design, but expect playback breakage windows.

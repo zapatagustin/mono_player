@@ -557,11 +557,11 @@ Window {
                             anchors.fill: parent
 
                             Component.onCompleted: {
-                                // ecomono: VP9-first. AV1 + zero-copy
-                                // segfaults in the iHD driver's Av1Pipeline
-                                // on decoder teardown (repro: --stress).
+                                // AV1-first; VP9 fallback. The iHD teardown
+                                // race is held off by TabManager's stop+drain
+                                // (re-verify with --stress after driver bumps).
                                 p.setProperty("ytdl-format",
-                                    "bv*[vcodec^=vp9][height<=?4320]+ba/bv*+ba/b")
+                                    "bv*[vcodec^=av01][height<=?4320]+ba/bv*[vcodec^=vp9]+ba/b")
                                 // Subtitle tracks must be requested or
                                 // ytdl_hook adds none.
                                 p.setProperty("ytdl-raw-options",
