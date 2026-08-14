@@ -680,6 +680,9 @@ Window {
                             clip: true
                             model: picker.items
                             currentIndex: 0
+                            boundsBehavior: Flickable.StopAtBounds
+                            highlightMoveDuration: 0
+                            highlightMoveVelocity: -1
 
                             delegate: Rectangle {
                                 id: plCell
@@ -721,6 +724,15 @@ Window {
                             model: comments
                             currentIndex: 0
                             spacing: 1
+                            // Anti-jump package for variable-height rows:
+                            // pre-lay rows outside the viewport, no flick
+                            // overshoot, no animated ensure-visible (DESIGN:
+                            // no animations — and it wrecks j/k anyway).
+                            cacheBuffer: 800
+                            boundsBehavior: Flickable.StopAtBounds
+                            highlightMoveDuration: 0
+                            highlightMoveVelocity: -1
+                            highlightResizeDuration: 0
 
                             delegate: Rectangle {
                                 id: commCell
@@ -751,12 +763,15 @@ Window {
                                 }
                                 Column {
                                     id: commCol
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.leftMargin: 10
-                                        + commCell.depth * 18
-                                    anchors.rightMargin: 6
-                                    anchors.verticalCenter: parent.verticalCenter
+                                    // Explicit geometry from the ListView's
+                                    // stable width — anchoring to the parent
+                                    // (whose height depends on this column's
+                                    // implicitHeight) needs several layout
+                                    // passes and the transient heights make
+                                    // scrolling jump.
+                                    x: 10 + commCell.depth * 18
+                                    y: 6
+                                    width: commList.width - x - 6
                                     spacing: 3
 
                                     Row {
@@ -827,6 +842,10 @@ Window {
                             clip: true
                             model: related.items
                             currentIndex: 0
+                            cacheBuffer: 400
+                            boundsBehavior: Flickable.StopAtBounds
+                            highlightMoveDuration: 0
+                            highlightMoveVelocity: -1
 
                             delegate: Rectangle {
                                 id: relCell

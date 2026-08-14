@@ -2,3 +2,4 @@ bridge/build/
 __pycache__/
 *.pyc
 .atl/
+.devshell-gcroot*
