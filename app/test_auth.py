@@ -212,15 +212,16 @@ def test_channel_cycle():
         m.channelChanged.connect(names.append)
 
         # Cycle: Personal (base) -> El Mono (delegated, header set).
+        # Channel state persists per account (namespaced meta keys).
         asyncio.run(m._cycle())
         assert names == ["El Mono"]
-        assert store.meta_get("page_id") == "113497"
+        assert store.meta_get("page_id:a@b.c") == "113497"
         assert innertube._page_id == "113497"
 
         # Cycle again: back to the base identity (no header).
         asyncio.run(m._cycle())
         assert names == ["El Mono", "Personal"]
-        assert store.meta_get("page_id") in ("", None)
+        assert store.meta_get("page_id:a@b.c") in ("", None)
         assert innertube._page_id == ""
 
         # A fresh manager restores the persisted channel on init.
@@ -235,9 +236,94 @@ def test_channel_cycle():
     print("channel cycle: ok")
 
 
+def test_account_cycle():
+    import json
+
+    import innertube
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TabStore(Path(tmp) / "mono.db")
+        kr = FakeKeyring()
+        kr.set_password("mono_player", "a@b.c", "master_a")
+        store.meta_set("auth_email", "a@b.c")
+        # Legacy single-account install: global channel keys, no list.
+        store.meta_set("page_id", "999")
+        store.meta_set("channel_name", "Legacy")
+
+        # Init migrates: email -> account list, channel keys -> namespaced.
+        m = make_auth(store, kr)
+        assert json.loads(store.meta_get("auth_emails")) == ["a@b.c"]
+        assert store.meta_get("page_id:a@b.c") == "999"
+        assert store.meta_get("page_id") is None
+        assert m.channelName == "Legacy" and innertube._page_id == "999"
+        assert m.accountEmail == "a@b.c" and m.accountCount == 1
+        m._set_channel("", "")  # back to base for the rest
+
+        # Only one account: cycling is a no-op with a hint.
+        errors = []
+        m.loginError.connect(errors.append)
+        m.cycleAccount()
+        assert errors == ["no other account (gL adds)"]
+        assert m.accountEmail == "a@b.c"
+
+        # Logging in while logged in ADDS an account and switches to it.
+        m.startLogin("b@x.y")
+        asyncio.run(m._exchange("tok"))
+        assert m.loggedIn and m.accountEmail == "b@x.y"
+        assert m.accountCount == 2
+        assert json.loads(store.meta_get("auth_emails")) == ["a@b.c", "b@x.y"]
+
+        # Per-account channel: brand on b survives a round trip through a.
+        m._set_channel("113497", "El Mono")
+        accounts = []
+        m.accountChanged.connect(accounts.append)
+        m.cycleAccount()
+        assert m.accountEmail == "a@b.c"
+        assert m.channelName == "" and innertube._page_id == ""
+        m.cycleAccount()
+        assert m.accountEmail == "b@x.y"
+        assert m.channelName == "El Mono" and innertube._page_id == "113497"
+        assert accounts == ["a@b.c", "b@x.y"]
+
+        # Switch clears the bearer cache: next mint uses the NEW master.
+        mints = []
+
+        def oauth(email, master, *a):
+            mints.append((email, master))
+            return {"Auth": "t", "Expiry": 5000.0}
+
+        m._oauth_fn = oauth
+        asyncio.run(m.bearer())
+        m.cycleAccount()  # -> a@b.c
+        asyncio.run(m.bearer())
+        assert mints == [("b@x.y", "aas_et/master"), ("a@b.c", "master_a")]
+
+        # Keyring entry gone: the dead account is dropped from the cycle.
+        del kr.secrets[("mono_player", "b@x.y")]
+        errors.clear()
+        m.cycleAccount()
+        assert errors == ["no other account (gL adds)"]
+        assert json.loads(store.meta_get("auth_emails")) == ["a@b.c"]
+
+        # Logout falls through to the remaining account; last one signs out.
+        m.startLogin("b@x.y")
+        asyncio.run(m._exchange("tok2"))
+        m._set_channel("113497", "El Mono")
+        m.logout()  # signs out b, falls through to a
+        assert m.loggedIn and m.accountEmail == "a@b.c"
+        assert kr.get_password("mono_player", "b@x.y") is None
+        assert store.meta_get("page_id:b@x.y") is None
+        m.logout()  # last account: fully signed out
+        assert not m.loggedIn and m.accountEmail == ""
+        assert json.loads(store.meta_get("auth_emails")) == []
+        assert innertube._page_id == ""
+    print("account cycle: ok")
+
+
 if __name__ == "__main__":
     test_parse_subscriptions()
     test_parse_accounts_list()
     test_auth_manager()
     test_channel_cycle()
+    test_account_cycle()
     print("all checks passed")

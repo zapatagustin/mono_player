@@ -97,13 +97,20 @@ Window {
                 else root.notify("login required (gl)")
                 root.watching = false; return true
             case Qt.Key_A:
-                if (auth.loggedIn) auth.cycleChannel()
-                else root.notify("login required (gl)")
+                if (!auth.loggedIn) { root.notify("login required (gl)"); return true }
+                if (event.modifiers & Qt.ShiftModifier) auth.cycleAccount()
+                else auth.cycleChannel()
                 return true
             case Qt.Key_L:
                 if (!authAvailable) { root.notify("webengine missing"); return true }
-                if (auth.loggedIn) { auth.logout(); root.notify("signed out") }
-                else { root.promptKind = "login"; root.prompting = true }
+                if (event.modifiers & Qt.ShiftModifier) {
+                    // gL: add another Google account (login while logged in)
+                    root.promptKind = "login"; root.prompting = true
+                } else if (auth.loggedIn) {
+                    auth.logout()
+                    root.notify(auth.loggedIn
+                        ? "signed out → " + auth.accountEmail : "signed out")
+                } else { root.promptKind = "login"; root.prompting = true }
                 return true
             case Qt.Key_C: {
                 const cid = root.watching ? related.channelId
@@ -164,6 +171,7 @@ Window {
     Connections {
         target: auth
         function onChannelChanged(name) { root.notify("channel: " + name) }
+        function onAccountChanged(email) { root.notify("account: " + email) }
         function onLoginError(msg) { root.notify(msg) }
     }
 
@@ -1200,6 +1208,24 @@ Window {
                     }
                 }
                 Rectangle { width: 1; height: parent.height; color: th.bg2 }
+
+                // Active Google account, when more than one is registered.
+                Text {
+                    id: accountTag
+                    width: auth.accountCount > 1 ? implicitWidth + 16 : 0
+                    height: parent.height
+                    visible: width > 0
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    text: auth.accountEmail
+                    color: th.fgDim
+                    font.pixelSize: th.fontSizeSmall
+                }
+                Rectangle {
+                    width: accountTag.visible ? 1 : 0
+                    height: parent.height
+                    color: th.bg2
+                }
 
                 // Acting-as channel (brand account), when one is selected.
                 Text {

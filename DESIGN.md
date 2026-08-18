@@ -103,7 +103,9 @@ the real layout. Key names in the tables below mean the QWERTY position.
 | `gs` / `gw` | subscriptions / watch-later feed (login required) |
 | `gh` / `gy` / `gp` | personalized home / history / playlists (login required) |
 | `ga` | cycle the acting YouTube channel (brand accounts); statusline shows `as <name>` |
-| `gl` | sign in (email prompt, then webview) — or sign out when logged in |
+| `gA` | cycle the active Google account; each account keeps its own acting channel; statusline shows the email when more than one is registered |
+| `gl` | sign in (email prompt, then webview) — or sign out the active account when logged in (falls through to the next account if one remains) |
+| `gL` | add another Google account (login flow while logged in, switches to it) |
 | `d` | remove selected video from the playlist being viewed (`gw`/`gp` feeds) |
 | `x` | close active tab |
 | `q` | quit |

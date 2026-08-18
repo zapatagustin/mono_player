@@ -4,6 +4,7 @@ never a file, never a log line, never sqlite. Bearer tokens are short-lived
 and never persisted. Login is optional; only sync features need it."""
 
 import asyncio
+import json
 import secrets
 import time
 
@@ -36,6 +37,7 @@ class AuthManager(QObject):
     showLoginChanged = Signal()
     loginError = Signal(str)
     channelChanged = Signal(str)  # active YouTube channel (brand) name
+    accountChanged = Signal(str)  # active Google account email
 
     def __init__(self, store, client=None, keyring_mod=None, exchange_fn=None,
                  oauth_fn=None, now_fn=None, parent=None):
@@ -61,9 +63,29 @@ class AuthManager(QObject):
         self._client = client
         self._channels_fn = innertube.list_channels
         self._email = store.meta_get("auth_email")
+        # Known Google logins, in cycle order. Migrate legacy installs:
+        # a lone auth_email becomes the list, the global channel keys
+        # become that account's namespaced ones.
+        try:
+            self._emails = json.loads(store.meta_get("auth_emails") or "[]")
+        except ValueError:
+            self._emails = []
+        if self._email and self._email not in self._emails:
+            self._emails.append(self._email)
+            store.meta_set("auth_emails", json.dumps(self._emails))
+        if self._email and store.meta_get(f"page_id:{self._email}") is None \
+                and store.meta_get("page_id") is not None:
+            store.meta_set(f"page_id:{self._email}",
+                           store.meta_get("page_id"))
+            store.meta_set(f"channel_name:{self._email}",
+                           store.meta_get("channel_name") or "")
+            store.meta_set("page_id", None)
+            store.meta_set("channel_name", None)
         # Restore the active channel delegation before any account fetch.
-        self._page_id = store.meta_get("page_id") or ""
-        self._channel_name = store.meta_get("channel_name") or ""
+        self._page_id = (store.meta_get(f"page_id:{self._email}") or "") \
+            if self._email else ""
+        self._channel_name = (store.meta_get(f"channel_name:{self._email}")
+                              or "") if self._email else ""
         innertube.set_page_id(self._page_id)
         self._pending_email = None
         self._show_login = False
@@ -121,11 +143,12 @@ class AuthManager(QObject):
             self.loginError.emit(resp.get("Error", "token exchange failed"))
             return
         self._keyring.set_password(KEYRING_SERVICE, email, master)
-        self._store.meta_set("auth_email", email)
-        self._email = email
+        if email not in self._emails:
+            self._emails.append(email)
+            self._store.meta_set("auth_emails", json.dumps(self._emails))
         self._pending_email = None
         self._set_show_login(False)
-        self.loggedInChanged.emit()
+        self._activate(email)
 
     # --- bearer tokens (minted on demand, never persisted) ---
 
@@ -147,6 +170,47 @@ class AuthManager(QObject):
             resp.get("Expiry", self._now() + BEARER_TTL_FALLBACK)
         )
         return auth
+
+    # --- Google account (login) switching ---
+
+    def _activate(self, email: str):
+        """Make email the active login: fresh bearer, its channel state."""
+        self._email = email
+        self._store.meta_set("auth_email", email)
+        self._bearer = None
+        self._bearer_expiry = 0.0
+        self._page_id = self._store.meta_get(f"page_id:{email}") or ""
+        self._channel_name = (
+            self._store.meta_get(f"channel_name:{email}") or "")
+        innertube.set_page_id(self._page_id)
+        self.loggedInChanged.emit()
+        self.channelChanged.emit(self._channel_name)  # binding + home reload
+        self.accountChanged.emit(email)
+
+    @Slot()
+    def cycleAccount(self):
+        order = list(self._emails)
+        if self._email in order:
+            i = order.index(self._email)
+            order = order[i + 1:] + order[:i]
+        for cand in order:
+            master = None
+            try:
+                master = self._keyring.get_password(KEYRING_SERVICE, cand)
+            except Exception as exc:
+                print(f"auth: keyring unavailable: {type(exc).__name__}")
+            if master:
+                self._activate(cand)
+                return
+            # Dead entry (keyring wiped externally): drop from the cycle.
+            self._emails.remove(cand)
+            self._store.meta_set("auth_emails", json.dumps(self._emails))
+        self.loginError.emit("no other account (gL adds)")
+
+    accountEmail = Property(str, lambda s: s._email or "",
+                            notify=loggedInChanged)
+    accountCount = Property(int, lambda s: len(s._emails),
+                            notify=loggedInChanged)
 
     # --- channel (brand account) switching ---
 
@@ -181,8 +245,9 @@ class AuthManager(QObject):
     def _set_channel(self, page_id: str, name: str):
         self._page_id = page_id
         self._channel_name = name
-        self._store.meta_set("page_id", page_id)
-        self._store.meta_set("channel_name", name)
+        if self._email:
+            self._store.meta_set(f"page_id:{self._email}", page_id)
+            self._store.meta_set(f"channel_name:{self._email}", name)
         innertube.set_page_id(page_id)
 
     channelName = Property(str, lambda s: s._channel_name,
@@ -190,14 +255,24 @@ class AuthManager(QObject):
 
     @Slot()
     def logout(self):
-        if self._email is not None:
+        """Sign out the ACTIVE account; fall through to the next one."""
+        email = self._email
+        if email is not None:
             try:
-                self._keyring.delete_password(KEYRING_SERVICE, self._email)
+                self._keyring.delete_password(KEYRING_SERVICE, email)
             except Exception:
                 pass
+            if email in self._emails:
+                self._emails.remove(email)
+                self._store.meta_set("auth_emails", json.dumps(self._emails))
+            self._store.meta_set(f"page_id:{email}", None)
+            self._store.meta_set(f"channel_name:{email}", None)
+        self._bearer = None
+        if self._emails:
+            self._activate(self._emails[0])
+            return
         self._store.meta_set("auth_email", None)
         self._email = None
-        self._bearer = None
         self._set_channel("", "")
         self.loggedInChanged.emit()
 

@@ -32,7 +32,8 @@ Playback never depends on login.
 | `/` | search prompt |
 | `gh` `gs` `gy` `gp` `gw` | home · subscriptions · history · playlists · watch later |
 | `gc` / `S` | open channel / subscribe |
-| `ga` / `gl` | switch acting channel (brand accounts) / sign in–out |
+| `ga` / `gA` | switch acting channel (brand accounts) / switch Google account |
+| `gl` / `gL` | sign in–out / add another Google account |
 | `1-9` `gt` `gT` `x` | tabs; `Esc` back to the playing video; `q` quit |
 
 | Watch | |
