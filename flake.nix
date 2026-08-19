@@ -24,9 +24,9 @@
             src = pkgs.fetchFromGitHub {
               owner = "yt-dlp";
               repo = "yt-dlp";
-              # pinned-nightly-date: 2026-08-04 (update with rev; check.sh warns past 30d)
-              rev = "5d6b8c8cd19785c3086ae3a9ec618c45e25eb3bc";
-              hash = "sha256:17wf454dpplgqsxmn58hsg7vkw627lws4q0k2pv2af50b434scml";
+              # pinned-nightly-date: 2026-08-18 (update with rev; check.sh warns past 30d)
+              rev = "5d5b634d8e6b41dc2891847a5ea7a5a3f569a28c";
+              hash = "sha256:1j85cmrpnl6h6a34myx15gj2047767hcnx13i1wa33zh6yz210dk";
             };
           });
         };
