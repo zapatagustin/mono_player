@@ -53,7 +53,21 @@ def test_parse_subscriptions():
         Video("aqz-KE-bpKQ", "Two", "chan", "4:56", "https://t/x.jpg"),
     ]
 
-    # Shelves/ads skipped; bad video ids skipped; garbage degrades.
+    # Current ANDROID shape: per-channel shelves of compactVideoRenderer.
+    data = subs_response([{"shelfRenderer": {"content": {"verticalListRenderer": {
+        "items": [{"compactVideoRenderer": {
+            "videoId": "aqz-KE-bpKQ",
+            "title": {"runs": [{"text": "Shelf"}]},
+            "shortBylineText": {"runs": [{"text": "chan"}]},
+            "lengthText": {"runs": [{"text": "2:00"}]},
+            "thumbnail": {"thumbnails": [{"url": "https://t/s.jpg"}]},
+        }}]
+    }}}}])
+    assert parse_subscriptions(data) == [
+        Video("aqz-KE-bpKQ", "Shelf", "chan", "2:00", "https://t/s.jpg"),
+    ]
+
+    # Empty shelves/ads skipped; bad video ids skipped; garbage degrades.
     data = subs_response([{"shelfRenderer": {}}, vwc("aqz-KE-bpKQ", "Two")])
     assert [v.video_id for v in parse_subscriptions(data)] == ["aqz-KE-bpKQ"]
     assert parse_subscriptions(subs_response([vwc("../evil", "x")])) == []

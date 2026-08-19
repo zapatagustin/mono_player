@@ -405,24 +405,20 @@ async def channel_videos(client, browse_id: str) -> list[Video]:
     return videos
 
 
+# ANDROID now serves per-channel shelves of compactVideoRenderer (same field
+# shape as playlistVideoRenderer); videoWithContextRenderer kept as legacy.
+_SUBS_RENDERERS = frozenset({"compactVideoRenderer", "videoWithContextRenderer"})
+
+
 def parse_subscriptions(data) -> list[Video]:
-    tabs = _walk(data, "contents", "singleColumnBrowseResultsRenderer", "tabs")
-    if not isinstance(tabs, list):
-        return []
     videos = []
-    for tab in tabs:
-        sections = _walk(tab, "tabRenderer", "content", "sectionListRenderer",
-                         "contents")
-        if not isinstance(sections, list):
-            continue
-        for section in sections:
-            items = _walk(section, "itemSectionRenderer", "contents")
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                video = _parse_video_with_context(item)
-                if video is not None:
-                    videos.append(video)
+    for name, vr in _find_renderers(data, _SUBS_RENDERERS):
+        if name == "compactVideoRenderer":
+            video = _parse_playlist_video(vr)
+        else:
+            video = _parse_video_with_context({"videoWithContextRenderer": vr})
+        if video is not None:
+            videos.append(video)
     return videos
 
 
