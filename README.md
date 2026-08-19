@@ -23,26 +23,35 @@ Requirements outside the flake: a Wayland session, VA-API capable hardware,
 and — only for account features — a Secret Service daemon (gnome-keyring).
 Playback never depends on login.
 
-## Keys (vim grammar; the statusline always shows what applies)
+## Keys (vim grammar; `?` opens the full list, the statusline shows what applies)
 
 | Browse | |
 |---|---|
-| `hjkl` / `gg` / `G` | move in the grid |
+| `hjkl` / `gg` / `G` | move in the grid (arrows work too) |
 | `Enter` / `t` / `a` / `p` / `w` | play / new tab / enqueue / play next / watch later |
+| `d` | remove from the playlist being viewed |
 | `/` | search prompt |
 | `gh` `gs` `gy` `gp` `gw` | home · subscriptions · history · playlists · watch later |
 | `gc` / `S` | open channel / subscribe |
 | `ga` / `gA` | switch acting channel (brand accounts) / switch Google account |
 | `gl` / `gL` | sign in–out / add another Google account |
+| `n` | autoplay when the queue runs out |
 | `1-9` `gt` `gT` `x` | tabs; `Esc` back to the playing video; `q` quit |
 
 | Watch | |
 |---|---|
 | `Space` `h/l` `j/k` `m` `s` `f` | pause · seek · volume · mute · subtitles · fullscreen |
-| `r` / `c` / `b` | related · comments · save-to-playlist panels |
-| `L` / `C` / `S` | like · write a comment · subscribe |
+| `r` / `c` / `b` / `u` | related · comments · save-to-playlist · queue panels |
+| `L` / `C` / `S` / `gc` | like · write a comment · subscribe · open the channel |
+| `n` | autoplay when the queue runs out |
+| in a panel: `j/k` move, `Enter` acts, `Esc` closes | |
 | in comments: `Enter` expands replies, `Shift+L` likes a comment | |
+| in the queue: `Enter` jumps, `Shift+J/K` reorders, `d` removes | |
+| in related: `t` / `a` / `p` new tab · enqueue · play next | |
 | `Esc` | back to browse (tab keeps playing) |
+
+Bindings are positional: they follow the physical QWERTY spots, so `hjkl`
+stay put under dvorak and friends.
 
 ## Account
 

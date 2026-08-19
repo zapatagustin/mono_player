@@ -18,12 +18,36 @@ Window {
     property bool prompting: false
     property string promptKind: "search"  // or "login"
     property string pending: ""           // vim pending key ("g")
+    property bool helpVisible: false       // key reference overlay ("?")
+    property bool whichKeyVisible: false   // g-chord menu, after a delay
     property string statusMsg: ""
     readonly property string mode: prompting ? "PROMPT"
                                  : watching ? "WATCH" : "BROWSE"
 
     readonly property var tabGlyphs:
         ["一", "二", "三", "四", "五", "六", "七", "八", "九"]
+
+    // g-chord menu: [continuation key(s), label]. Feeds the which-key popup
+    // and HelpOverlay, and must list every key gKey() dispatches on
+    // (app/test_helpkeys.py asserts the two sets match).
+    readonly property var gChords: [
+        ["g", "top of the grid"], ["t/T", "next/prev tab"],
+        ["h", "home"], ["s", "subscriptions"], ["y", "history"],
+        ["p", "playlists"], ["w", "watch later"], ["c", "open channel"],
+        ["a/A", "acting channel / account"], ["l/L", "sign in / add account"],
+    ]
+
+    // which-key: shown only if "g" stays pending, so fast chords (gg) never
+    // flash the popup.
+    onPendingChanged: {
+        if (pending === "g") whichKeyDelay.restart()
+        else { whichKeyDelay.stop(); whichKeyVisible = false }
+    }
+    Timer {
+        id: whichKeyDelay
+        interval: 200
+        onTriggered: root.whichKeyVisible = (root.pending === "g")
+    }
 
     function notify(msg) {
         statusMsg = msg
@@ -32,7 +56,10 @@ Window {
     Timer { id: statusClear; interval: 3000; onTriggered: root.statusMsg = "" }
 
     function refocus() {
-        if (root.prompting) promptField.forceActiveFocus()
+        // Help keeps the focus through anything happening behind it (a queued
+        // video starting, a tab switch): it must stay the only key consumer.
+        if (root.helpVisible) helpLoader.item?.forceActiveFocus()
+        else if (root.prompting) promptField.forceActiveFocus()
         else if (root.watching) playerView.forceActiveFocus()
         else browseKeys.forceActiveFocus()
     }
@@ -317,7 +344,12 @@ Window {
                             feed.removeFromPlaylist(cur.videoId)
                         else root.notify("not a playlist of yours")
                         break
+                    case Qt.Key_Question:  // layouts where "/" is unmapped
+                        root.helpVisible = true; break
                     case Qt.Key_Slash:
+                        if (event.modifiers & Qt.ShiftModifier) {  // "?"
+                            root.helpVisible = true; break
+                        }
                         root.promptKind = "search"; root.prompting = true; break
                     case Qt.Key_N:
                         tabs.toggleAutoplay()
@@ -1129,6 +1161,13 @@ Window {
                     // Keys that must work even with no live player (a black
                     // watch view must never trap the user).
                     switch (key) {
+                    case Qt.Key_Slash:
+                        if (!(event.modifiers & Qt.ShiftModifier)) break
+                        // fallthrough: shift+/ is "?"
+                    case Qt.Key_Question:
+                        root.helpVisible = true
+                        event.accepted = true
+                        return
                     case Qt.Key_Escape:
                         root.watching = false
                         event.accepted = true
@@ -1195,6 +1234,41 @@ Window {
                 // Mouse never gates: click toggles pause.
                 TapHandler {
                     onTapped: playerView.activePlayer?.togglePause()
+                }
+            }
+
+            // which-key popup: the g-chord menu, sitting on the statusline.
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: visible ? chordFlow.implicitHeight + 10 : 0
+                visible: root.whichKeyVisible
+                z: 5
+                color: th.bg1
+                border.color: th.bg2
+                border.width: 1
+
+                Flow {
+                    id: chordFlow
+                    x: 8
+                    y: 5
+                    width: parent.width - 16
+                    spacing: 14
+
+                    Text {
+                        text: "g"
+                        color: th.accent
+                        font.pixelSize: th.fontSizeSmall
+                    }
+                    Repeater {
+                        model: root.gChords
+                        Text {
+                            required property var modelData
+                            text: modelData[0] + " " + modelData[1]
+                            color: th.fgDim
+                            font.pixelSize: th.fontSizeSmall
+                        }
+                    }
                 }
             }
         }
@@ -1310,8 +1384,8 @@ Window {
                         : root.watching && statusline.ap && statusline.ap.loading
                         ? "loading…"
                         : root.watching
-                        ? "space pause · h/l seek · j/k vol · r related · c comments · C comment · b playlist · L like · S subscribe · gc channel · m mute · f full · n autoplay · gt/1-9 tab · esc back"
-                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · n autoplay · esc video · q quit"
+                        ? "space pause · h/l seek · j/k vol · r related · c comments · C comment · b playlist · u queue · L like · S subscribe · gc channel · m mute · f full · n autoplay · gt/1-9 tab · esc back · ? help"
+                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · n autoplay · esc video · q quit · ? help"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim
@@ -1416,5 +1490,22 @@ Window {
         z: 10
         active: authAvailable && auth.showLogin
         source: "LoginView.qml"
+    }
+
+    // Key reference ("?"): loaded on demand and given the focus, so every
+    // key goes to it (HelpOverlay swallows all but its close keys).
+    Loader {
+        id: helpLoader
+        anchors.fill: parent
+        z: 20
+        focus: root.helpVisible
+        active: root.helpVisible
+        source: "HelpOverlay.qml"
+        onLoaded: {
+            item.chords = root.gChords
+            item.closed.connect(() => { root.helpVisible = false
+                                        root.refocus() })
+            item.forceActiveFocus()
+        }
     }
 }
