@@ -177,6 +177,7 @@ def main() -> int:
             QTimer.singleShot(0, lambda: tabs.activate(tabs.activeIndex))
 
     # Dev harness: `main.py "query"` searches; `--play <id>` opens a tab.
+    soak = None
     if len(sys.argv) > 2 and sys.argv[1] == "--play":
         QTimer.singleShot(0, lambda: tabs.playVideo(sys.argv[2], sys.argv[2]))
     elif len(sys.argv) > 1 and sys.argv[1] == "--login":
@@ -206,6 +207,13 @@ def main() -> int:
 
         stress_timer.timeout.connect(stress)
         stress_timer.start()
+    elif len(sys.argv) > 1 and sys.argv[1] == "--soak":
+        # Live stability walk over the loaded window (app/soak.py owns the
+        # steps, the failure hooks and the exit code). Imported lazily:
+        # normal runs never pull the harness in.
+        from soak import Soak
+        soak = Soak(app, engine.rootObjects()[0], feed, tabs, auth)
+        soak.start()
     elif len(sys.argv) > 1:
         QTimer.singleShot(0, lambda: feed.search(sys.argv[1]))
 
@@ -217,7 +225,7 @@ def main() -> int:
     # go out of scope: live QML bindings otherwise re-evaluate against
     # dead context properties and spam TypeErrors on every exit.
     del engine
-    return 0
+    return soak.exit_code if soak is not None else 0
 
 
 if __name__ == "__main__":
