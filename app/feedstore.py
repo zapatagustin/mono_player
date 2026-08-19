@@ -29,6 +29,11 @@ class FeedStore:
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db_path)
+        # Pure cache on the Qt main thread: WAL + NORMAL cuts the DELETE-all
+        # +reinsert commit from ~14ms (fsync-bound) to ~0.05ms; worst loss on
+        # power cut is a cache the next refresh repopulates anyway.
+        self.db.execute("PRAGMA journal_mode = WAL")
+        self.db.execute("PRAGMA synchronous = NORMAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS feed_cache " + _TABLE_BODY)
         # Pure cache: an older schema missing the new columns is dropped and
         # recreated rather than migrated -- next network refresh repopulates it.

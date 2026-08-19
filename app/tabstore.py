@@ -25,6 +25,12 @@ class TabStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(db_path)
         self.db.execute("PRAGMA foreign_keys = ON")
+        # Queue writes are DELETE-all+reinsert on the Qt main thread; WAL +
+        # NORMAL cuts the commit from ~14ms (fsync-bound) to ~0.05ms, which
+        # matters under key auto-repeat in the queue panel. Worst loss on
+        # power cut under NORMAL is the last few seconds of queue state.
+        self.db.execute("PRAGMA journal_mode = WAL")
+        self.db.execute("PRAGMA synchronous = NORMAL")
         with self.db:
             self.db.executescript(
                 """CREATE TABLE IF NOT EXISTS tabs (
