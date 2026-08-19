@@ -5,10 +5,16 @@ import re
 from dataclasses import dataclass
 
 SEARCH_URL = "https://www.youtube.com/youtubei/v1/search"
+
+# Stale clientVersions get 400 FAILED_PRECONDITION — bump here when that
+# appears (GUIDELINE.org).
+WEB_CLIENT_VERSION = "2.20260101.00.00"
+ANDROID_CLIENT_VERSION = "20.10.38"
+
 CLIENT_CONTEXT = {
     "client": {
         "clientName": "WEB",
-        "clientVersion": "2.20260101.00.00",
+        "clientVersion": WEB_CLIENT_VERSION,
         "hl": "en",
         "gl": "US",
     }
@@ -97,17 +103,16 @@ BROWSE_URL = "https://www.youtube.com/youtubei/v1/browse"
 
 # Subscriptions ride the ANDROID client with a gpsoauth Bearer -- account
 # data only, never stream URLs (GUIDELINE.org, Architecture).
-# Stale clientVersions get 400 FAILED_PRECONDITION — bump when that appears.
 ANDROID_CONTEXT = {
     "client": {
         "clientName": "ANDROID",
-        "clientVersion": "20.10.38",
+        "clientVersion": ANDROID_CLIENT_VERSION,
         "androidSdkVersion": 34,
         "hl": "en",
         "gl": "US",
     }
 }
-ANDROID_UA = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+ANDROID_UA = f"com.google.android.youtube/{ANDROID_CLIENT_VERSION} (Linux; U; Android 14) gzip"
 
 
 def _text(node) -> str | None:
@@ -227,7 +232,7 @@ NEXT_URL = "https://www.youtube.com/youtubei/v1/next"
 WEB_CONTEXT = {
     "client": {
         "clientName": "WEB",
-        "clientVersion": "2.20260101.00.00",
+        "clientVersion": WEB_CLIENT_VERSION,
         "hl": "en",
         "gl": "US",
     }
