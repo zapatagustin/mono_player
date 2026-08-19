@@ -302,7 +302,8 @@ the flake.
    Parser, LRU eviction and store are checked in =app/test_feed.py=.
    Verified live: search returned 20 videos, 20 thumbs cached, cold start
    painted from sqlite. Feed source is search; the "home" question stays
-   open. Skipped as YAGNI: search continuation/pagination.
+   open. Search continuation/pagination BUILT 2026-08-19 (see below):
+   what was skipped as YAGNI here now has a call site.
 3. DONE (2026-08-10). Tabs in =app/tabstore.py= (tables =tabs=,
    =queue_items=, =meta.active_tab=; FK cascade) + =app/tabmanager.py=
    (strip model, pure =materialize()=: current item =loadfile replace=
@@ -362,3 +363,31 @@ the flake.
    frame rendered in <1ms (the FBO blit; compositing is Hyprland's job).
    Chromium ran as installed — no VAAPI flags — which is the honest
    comparison: that IS Chrome-on-Linux as people run it.
+7. DONE (2026-08-19). Search pagination: =innertube.search()= now returns
+   =(videos, continuation_token)= (mirrors the comments continuation
+   pattern -- =parse_search_token=/=parse_search_continuation=), and
+   =search_continuation(client, token)= fetches the next page. =FeedModel=
+   holds the token only while the surface is search (any other load clears
+   it, in =_set_videos=); the QML grid's =onContentYChanged= calls
+   =loadMoreSearchResults()= near the bottom, and new rows are appended
+   (not reset) deduped by =video_id= against what's already loaded --
+   InnerTube repeats items across pages. Deliberately search-only, not
+   generalized to home/subs/history (still YAGNI there). Checked in
+   =app/test_feed.py=.
+8. DONE (2026-08-19). Autoplay on queue exhaustion: opt-in, session-only,
+   per-app (not per-tab) flag on =TabManager= (=autoplay= property,
+   =toggleAutoplay()=, key =n= in both browse and watch modes -- positional
+   per DESIGN.md's keybinding policy). Hooked into the existing
+   =playlistPos= observer: mpv's playlist-pos going to -1 IS true queue
+   exhaustion (idle, nothing next); when armed, the first related video
+   (of the one that just finished) not yet played in that tab this session
+   gets enqueued through the existing =_insert_into_queue= path (same
+   sqlite writes, same queue model update), with the mpv flag switched from
+   =append= to =append-play= since mpv is idle and needs telling to start.
+   Related videos come from =RelatedModel.related_for()=, a cache-only read
+   (never fetches) fed by the prefetch that already runs on every
+   =currentVideoChanged= -- zero new network paths. Played-video ids are
+   tracked per tab (=dict[tab_id, set[video_id]]=), in memory only: ceiling
+   is per-tab-per-session, no cross-tab or cross-restart history (add if it
+   hurts). Statusline shows =AP= (green) while armed. Checked in
+   =app/test_tabs.py=.

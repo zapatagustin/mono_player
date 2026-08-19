@@ -40,6 +40,10 @@ class FeedModel(QAbstractListModel):
         self._context_playlist_id = ""
         self._thumbs: dict[str, str] = {}  # video_id -> local file URL
         self._pending: set[str] = set()
+        # Search-only pagination (GUIDELINE.org): the continuation token for
+        # the current search, cleared by any non-append feed load.
+        self._search_token = ""
+        self._loading_more = False
         # Cold start: paint the cached feed before any network.
         self._videos: list[Video] = store.load()
         if self._videos:
@@ -95,6 +99,13 @@ class FeedModel(QAbstractListModel):
         query = query.strip()
         if query:
             asyncio.create_task(self._search(query))
+
+    @Slot()
+    def loadMoreSearchResults(self):
+        """Called from QML when the grid scrolls near the end. Search only
+        (GUIDELINE.org: deliberate YAGNI for home/subs/history)."""
+        if self._search_token and not self._loading_more:
+            asyncio.create_task(self._search_more())
 
     @Slot(str)
     def requestThumb(self, video_id: str):
@@ -252,13 +263,29 @@ class FeedModel(QAbstractListModel):
 
     async def _search(self, query: str):
         try:
-            videos = await innertube.search(self._client, query)
+            videos, token = await innertube.search(self._client, query)
         except Exception as exc:  # error surface: log, keep current feed
             print(f"feed: search failed: {exc!r}")
             return
         print(f"feed: {len(videos)} videos for {query!r}")
         self._set_videos(videos)
+        self._search_token = token
         self._set_context("search: " + query)
+
+    async def _search_more(self):
+        token = self._search_token
+        self._loading_more = True
+        try:
+            videos, next_token = await innertube.search_continuation(
+                self._client, token)
+        except Exception as exc:
+            print(f"feed: search continuation failed: {exc!r}")
+            self._loading_more = False
+            return
+        self._loading_more = False
+        self._search_token = next_token
+        print(f"feed: {len(videos)} more videos (continuation)")
+        self._append_videos(videos)
 
     async def _load_subscriptions(self):
         await self._load_account_feed(innertube.subscriptions, "subscriptions")
@@ -319,6 +346,22 @@ class FeedModel(QAbstractListModel):
         self._videos = videos
         self.endResetModel()
         self._store.save(videos)
+        # Any full reload invalidates search pagination; _search() re-sets
+        # the token right after this, for the search path only.
+        self._search_token = ""
+
+    def _append_videos(self, videos):
+        """Append a search continuation page, deduped by video_id -- YouTube
+        repeats items across pages (GUIDELINE.org)."""
+        existing = {v.video_id for v in self._videos}
+        new = [v for v in videos if v.video_id not in existing]
+        if not new:
+            return
+        start = len(self._videos)
+        self.beginInsertRows(QModelIndex(), start, start + len(new) - 1)
+        self._videos.extend(new)
+        self.endInsertRows()
+        self._store.save(self._videos)
 
     async def _fetch_thumb(self, video_id: str, url: str):
         try:

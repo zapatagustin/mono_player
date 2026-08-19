@@ -1,10 +1,12 @@
 """Checks for the InnerTube search parser (trust boundary: malformed data
 must degrade, never crash), the thumbnail disk LRU, and the feed cache."""
 
+import asyncio
 import os
 import tempfile
 from pathlib import Path
 
+import innertube
 from innertube import (
     PlaylistOption,
     Video,
@@ -13,7 +15,10 @@ from innertube import (
     parse_playlist_options,
     parse_playlists_list,
     parse_search,
+    parse_search_continuation,
+    parse_search_token,
 )
+from feedmodel import FeedModel
 from thumbs import ThumbCache
 from feedstore import FeedStore
 
@@ -93,6 +98,135 @@ def test_parser():
     }
     assert parse_search(search_response([item]))[0].channel_id == "UCabc123"
     print("parser: ok")
+
+
+def search_response_with_sections(sections):
+    return {
+        "contents": {
+            "twoColumnSearchResultsRenderer": {
+                "primaryContents": {
+                    "sectionListRenderer": {"contents": sections}
+                }
+            }
+        }
+    }
+
+
+def continuation_item(token):
+    return {"continuationItemRenderer": {"continuationEndpoint": {
+        "continuationCommand": {"token": token}}}}
+
+
+def test_search_token_parser():
+    # Continuation token lives in a continuationItemRenderer sibling
+    # section, not nested inside the itemSectionRenderer sections.
+    data = search_response_with_sections([
+        {"itemSectionRenderer": {"contents": [video_renderer("dQw4w9WgXcQ", "One")]}},
+        continuation_item("TOKEN123"),
+    ])
+    assert parse_search_token(data) == "TOKEN123"
+
+    # Last page: no continuation section -> empty.
+    data2 = search_response([video_renderer("dQw4w9WgXcQ", "One")])
+    assert parse_search_token(data2) == ""
+
+    # Garbage degrades.
+    assert parse_search_token({}) == ""
+    assert parse_search_token(None) == ""
+    print("search token parser: ok")
+
+
+def test_search_continuation_parser():
+    # A continuation page: onResponseReceivedCommands, not the first page's
+    # twoColumnSearchResultsRenderer shape.
+    data = {
+        "onResponseReceivedCommands": [
+            {"appendContinuationItemsAction": {"continuationItems": [
+                {"itemSectionRenderer": {"contents": [
+                    video_renderer("dQw4w9WgXcQ", "One"),
+                    video_renderer("aqz-KE-bpKQ", "Two"),
+                ]}},
+                continuation_item("TOKEN456"),
+            ]}}
+        ]
+    }
+    videos, token = parse_search_continuation(data)
+    assert [v.video_id for v in videos] == ["dQw4w9WgXcQ", "aqz-KE-bpKQ"]
+    assert token == "TOKEN456"
+
+    # Last page: no continuationItemRenderer -> empty token, not fatal.
+    data2 = {
+        "onResponseReceivedCommands": [
+            {"appendContinuationItemsAction": {"continuationItems": [
+                {"itemSectionRenderer": {
+                    "contents": [video_renderer("aqz-KE-bpKQ", "Two")]}},
+            ]}}
+        ]
+    }
+    videos2, token2 = parse_search_continuation(data2)
+    assert [v.video_id for v in videos2] == ["aqz-KE-bpKQ"]
+    assert token2 == ""
+
+    # Garbage degrades.
+    assert parse_search_continuation({}) == ([], "")
+    assert parse_search_continuation(None) == ([], "")
+    print("search continuation parser: ok")
+
+
+class FakeFeedStore:
+    """No sqlite: just enough for FeedModel's save()/load() calls."""
+
+    def __init__(self):
+        self.saved = []
+
+    def load(self):
+        return []
+
+    def save(self, videos):
+        self.saved = list(videos)
+
+
+def test_feedmodel_search_pagination():
+    # Search only (GUIDELINE.org): FeedModel holds the continuation token
+    # while browsing search results, appends+dedupes on the next page, and
+    # drops the token once any other feed loads or the pages run out.
+    real_search, real_continuation = innertube.search, innertube.search_continuation
+    try:
+        async def fake_search(client, query):
+            return [Video("aaaaaaaaaaa", "One", "c", "1:00", "https://t/1.jpg")], "TOK1"
+
+        async def fake_continuation(client, token):
+            assert token == "TOK1"
+            # InnerTube repeats items across pages -- "aaaaaaaaaaa" again.
+            return [
+                Video("aaaaaaaaaaa", "One", "c", "1:00", "https://t/1.jpg"),
+                Video("bbbbbbbbbbb", "Two", "c", "2:00", "https://t/2.jpg"),
+            ], ""
+
+        innertube.search = fake_search
+        innertube.search_continuation = fake_continuation
+
+        store = FakeFeedStore()
+        model = FeedModel(client=None, store=store, cache=None)
+        asyncio.run(model._search("query"))
+        assert [v.video_id for v in model._videos] == ["aaaaaaaaaaa"]
+        assert model._search_token == "TOK1"
+
+        asyncio.run(model._search_more())
+        assert [v.video_id for v in model._videos] == \
+            ["aaaaaaaaaaa", "bbbbbbbbbbb"]
+        assert store.saved == model._videos
+        # Pages exhausted -> token cleared, further calls are no-ops.
+        assert model._search_token == ""
+        model.loadMoreSearchResults()  # no token: does not touch asyncio
+
+        # A non-search load (e.g. a channel open) invalidates pagination.
+        model._set_videos([Video("ccccccccccc", "Three", "c", "", "")])
+        assert model._search_token == ""
+    finally:
+        innertube.search = real_search
+        innertube.search_continuation = real_continuation
+    print("feedmodel search pagination: ok")
 
 
 def test_next_parser():
@@ -373,6 +507,9 @@ def test_feed_store():
 
 if __name__ == "__main__":
     test_parser()
+    test_search_token_parser()
+    test_search_continuation_parser()
+    test_feedmodel_search_pagination()
     test_next_parser()
     test_playlists_list_parser()
     test_playlist_options_parser()

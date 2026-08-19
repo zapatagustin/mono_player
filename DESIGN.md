@@ -98,6 +98,7 @@ the real layout. Key names in the tables below mean the QWERTY position.
 | `a` | append to queue (enqueue) |
 | `w` | watch later |
 | `/` | focus search prompt |
+| `n` | toggle autoplay (session-only; statusline shows `AP` when on) |
 | `1`–`9` | switch to tab N |
 | `gt` / `gT` | next / previous tab |
 | `gs` / `gw` | subscriptions / watch-later feed (login required) |
@@ -124,6 +125,7 @@ the real layout. Key names in the tables below mean the QWERTY position.
 | `b` | save to playlist (panel picker; ✓ marks playlists that already have it) |
 | `r` / `c` | related / comments side panel (j/k navigate, enter acts) |
 | `u` | queue side panel: j/k navigate, `J`/`K` move item down/up, `d` remove, enter jumps (only upcoming items move) |
+| `n` | toggle autoplay (same as browse) |
 | `f` | fullscreen |
 | `1`–`9`, `gt`/`gT`, `x` | tab actions, same as browse |
 | `Esc` | back to browse (tab keeps playing) |
@@ -156,7 +158,9 @@ fill, `/` prompt glyph in `accent`, query text in `fg`. Lives at the top, replac
 nothing, never floats.
 
 **Statusline (bottom, 28px, always visible).** Replaces the auto-hide overlay —
-a TUI never hides its statusline. Left: mode tag (`BROWSE` / `WATCH` in `accent`).
+a TUI never hides its statusline. Left: mode tag (`BROWSE` / `WATCH` in `accent`),
+account/channel tags, then `AP` (`green`) whenever autoplay is armed — visible in
+both modes, since the flag is per-app, not per-view.
 Center: current video title (`fg`, elided). Right, watch mode: textual progress
 `12:34 / 45:06`, a flat `accent`-on-`bg2` progress bar (1-cell tall, no handle),
 volume `vol 85`, decode tag (`vaapi` in `green`, `sw` in `red`). Segments split by

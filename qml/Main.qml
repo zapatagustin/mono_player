@@ -319,6 +319,10 @@ Window {
                         break
                     case Qt.Key_Slash:
                         root.promptKind = "search"; root.prompting = true; break
+                    case Qt.Key_N:
+                        tabs.toggleAutoplay()
+                        root.notify("autoplay " + (tabs.autoplay ? "on" : "off"))
+                        break
                     case Qt.Key_S:  // shift+s: subscribe (cell's channel,
                                     // else the channel feed being viewed)
                         if (!(event.modifiers & Qt.ShiftModifier))
@@ -346,6 +350,14 @@ Window {
                     cacheBuffer: 600
                     clip: true
                     model: feed
+
+                    // Search pagination only (GUIDELINE.org): near the
+                    // bottom, ask for the next page. feed no-ops outside
+                    // a search context (no continuation token held).
+                    onContentYChanged: {
+                        if (contentY + height >= contentHeight - cellHeight * 2)
+                            feed.loadMoreSearchResults()
+                    }
 
                     delegate: Item {
                         id: cell
@@ -1126,6 +1138,11 @@ Window {
                             ? Window.Windowed : Window.FullScreen
                         event.accepted = true
                         return
+                    case Qt.Key_N:
+                        tabs.toggleAutoplay()
+                        root.notify("autoplay " + (tabs.autoplay ? "on" : "off"))
+                        event.accepted = true
+                        return
                     }
                     const ap = playerView.activePlayer
                     if (!ap) return
@@ -1245,6 +1262,24 @@ Window {
                     color: th.bg2
                 }
 
+                // Autoplay indicator (session-only, per-app -- n toggles).
+                Text {
+                    id: autoplayTag
+                    width: tabs.autoplay ? implicitWidth + 16 : 0
+                    height: parent.height
+                    visible: width > 0
+                    verticalAlignment: Text.AlignVCenter
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "AP"
+                    color: th.green
+                    font.pixelSize: th.fontSizeSmall
+                }
+                Rectangle {
+                    width: autoplayTag.visible ? 1 : 0
+                    height: parent.height
+                    color: th.bg2
+                }
+
                 // Feed context (what the grid is showing) while browsing.
                 Text {
                     id: contextTag
@@ -1275,8 +1310,8 @@ Window {
                         : root.watching && statusline.ap && statusline.ap.loading
                         ? "loading…"
                         : root.watching
-                        ? "space pause · h/l seek · j/k vol · r related · c comments · C comment · b playlist · L like · S subscribe · gc channel · m mute · f full · gt/1-9 tab · esc back"
-                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · esc video · q quit"
+                        ? "space pause · h/l seek · j/k vol · r related · c comments · C comment · b playlist · L like · S subscribe · gc channel · m mute · f full · n autoplay · gt/1-9 tab · esc back"
+                        : "hjkl move · enter play · / search · gh home · gs subs · gy history · gp lists · gw later · gc channel · ga channel-as · t/a/p/w/S act · n autoplay · esc video · q quit"
                     color: root.statusMsg !== ""
                            || (root.watching && statusline.ap && statusline.ap.loading)
                         ? th.fg : th.fgDim

@@ -487,6 +487,64 @@ def test_queue_ops():
     print("queue ops: ok")
 
 
+def test_autoplay():
+    # Session-only flag (per-app, not per-tab): off by default, no auto
+    # enqueue; on, enqueues the first related video not yet played in this
+    # tab, skipping ones already played, via the existing enqueue path
+    # (append-play -- mpv is idle at true queue exhaustion).
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        related_map = {
+            "aaaaaaaaaaa": [("bbbbbbbbbbb", "B")],
+            "bbbbbbbbbbb": [("aaaaaaaaaaa", "A"), ("ccccccccccc", "C")],
+        }
+        m = make_manager(
+            store, related_provider=lambda vid: related_map.get(vid, []))
+        ev = collect(m)
+
+        m.playVideo("aaaaaaaaaaa", "A")
+        t1 = store.load()[0][0].id
+        m.playlistPos(t1, 0)  # mpv's initial pos-changed: A marked played
+
+        # Flag off: exhausting the queue is a no-op.
+        ev.clear()
+        m.playlistPos(t1, -1)
+        assert ev == []
+
+        # Flag on: first related video (of the just-finished one) not yet
+        # played gets enqueued and told to resume playback.
+        m.toggleAutoplay()
+        assert m.autoplay is True
+        ev.clear()
+        m.playlistPos(t1, -1)
+        assert ev == [
+            ("cmd", t1, ["loadfile", url("bbbbbbbbbbb"), "append-play"])
+        ]
+        tabs, _ = store.load()
+        assert [q.video_id for q in tabs[0].queue] == \
+            ["aaaaaaaaaaa", "bbbbbbbbbbb"]
+
+        # B starts (marks it played). Exhausting again: B's related list
+        # leads with the already-played A -- skipped -- then C.
+        m.playlistPos(t1, 1)
+        ev.clear()
+        m.playlistPos(t1, -1)
+        assert ev == [
+            ("cmd", t1, ["loadfile", url("ccccccccccc"), "append-play"])
+        ]
+
+        # C starts and finishes; nothing related to C -> no-op, no crash.
+        m.playlistPos(t1, 2)
+        ev.clear()
+        m.playlistPos(t1, -1)
+        assert ev == []
+
+        # Toggling back off silences it again.
+        m.toggleAutoplay()
+        assert m.autoplay is False
+    print("autoplay: ok")
+
+
 def test_close_active_tab_persists_successor():
     # Closing the active tab when the successor lands on the SAME row
     # index must still persist the new active id (regression: _set_active
@@ -518,5 +576,6 @@ if __name__ == "__main__":
     test_resolved_url_cache()
     test_fresh_load_retry()
     test_queue_ops()
+    test_autoplay()
     test_close_active_tab_persists_successor()
     print("all checks passed")

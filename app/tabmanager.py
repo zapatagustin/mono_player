@@ -129,10 +129,12 @@ class TabManager(QAbstractListModel):
     videoStarted = Signal()
     activeIndexChanged = Signal()
     currentVideoChanged = Signal(str)  # active tab's current video id
+    autoplayChanged = Signal()
 
     def __init__(self, store: TabStore, materialize_delay_ms: int = 50,
                  url_cache=None, now_fn=time.time, live_cap: int = LIVE_CAP,
-                 freeze_ttl_secs: float = FREEZE_TTL_SECS, parent=None):
+                 freeze_ttl_secs: float = FREEZE_TTL_SECS,
+                 related_provider=None, parent=None):
         super().__init__(parent)
         self._store = store
         self._materialize_delay_ms = materialize_delay_ms
@@ -149,6 +151,12 @@ class TabManager(QAbstractListModel):
         self._loading_since: float | None = None  # time-to-first-frame probe
         self._queue_model = QueueModel(self)
         self._sync_queue_model()
+        # Autoplay on queue exhaustion (GUIDELINE.org): per-app, session-only,
+        # opt-in flag; `related_provider(video_id)` returns cached
+        # (video_id, title) pairs (RelatedModel.related_for), never fetches.
+        self._autoplay = False
+        self._related_provider = related_provider
+        self._played: dict[int, set[str]] = {}  # tab_id -> played video ids
 
     # --- QAbstractListModel ---
 
@@ -178,6 +186,16 @@ class TabManager(QAbstractListModel):
         return self._queue_model
 
     queueModel = Property(QObject, _get_queue_model, constant=True)
+
+    def _get_autoplay(self):
+        return self._autoplay
+
+    autoplay = Property(bool, _get_autoplay, notify=autoplayChanged)
+
+    @Slot()
+    def toggleAutoplay(self):
+        self._autoplay = not self._autoplay
+        self.autoplayChanged.emit()
 
     # --- invokables ---
 
@@ -281,16 +299,22 @@ class TabManager(QAbstractListModel):
 
     @Slot(int, int)
     def playlistPos(self, tab_id: int, pos: int):
-        if pos < 0:
-            return
         row = self._row_of(tab_id)
+        if row is None:
+            return
+        if pos < 0:
+            # True queue exhaustion: mpv went idle, nothing plays next.
+            if row == self._active:
+                self._maybe_autoplay(row)
+            return
         live = self._live.get(tab_id)
-        if row is None or live is None:
+        if live is None:
             return
         tab = self._tabs[row]
         if not tab.queue:
             return
         idx = min(live.offset + pos, len(tab.queue) - 1)
+        self._mark_played(tab.id, tab.queue[idx].video_id)
         if idx != tab.queue_idx:
             self._update_tab(row, Tab(tab.id, tab.queue, idx, 0.0))
             self._store.save_state(tab.id, idx, 0.0)
@@ -495,7 +519,8 @@ class TabManager(QAbstractListModel):
                 return cached
         return WATCH_URL + video_id
 
-    def _insert_into_queue(self, video_id: str, title: str, at_end: bool):
+    def _insert_into_queue(self, video_id: str, title: str, at_end: bool,
+                          resume_idle: bool = False):
         if self._active < 0:
             self.playVideo(video_id, title)
             return
@@ -512,9 +537,32 @@ class TabManager(QAbstractListModel):
         self._queue_model.insert_row(pos, item)
         live = self._live.get(tab.id)
         if live is not None:
-            flag = "append" if at_end else "insert-next"
+            # resume_idle: autoplay's hook -- mpv is idle (queue just
+            # exhausted), so the append must also start it playing.
+            flag = ("append-play" if resume_idle
+                    else "append" if at_end else "insert-next")
             self.mpvCommandFor.emit(
                 tab.id, ["loadfile", self._resolve(live, video_id), flag])
+
+    def _mark_played(self, tab_id: int, video_id: str):
+        self._played.setdefault(tab_id, set()).add(video_id)
+
+    def _maybe_autoplay(self, row: int):
+        """Queue exhaustion hook: when armed, enqueue the first related
+        video (of the one that just finished) not already played in this
+        tab this session, via the existing enqueue path."""
+        if not self._autoplay or self._related_provider is None:
+            return
+        tab = self._tabs[row]
+        if not tab.queue:
+            return
+        last = tab.queue[tab.queue_idx].video_id
+        played = self._played.get(tab.id, set())
+        for video_id, title in self._related_provider(last):
+            if video_id != last and video_id not in played:
+                self._insert_into_queue(video_id, title, at_end=True,
+                                        resume_idle=True)
+                return
 
     def _row_of(self, tab_id: int):
         return next((i for i, t in enumerate(self._tabs) if t.id == tab_id),

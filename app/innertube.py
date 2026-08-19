@@ -76,7 +76,7 @@ def _parse_video(item) -> Video | None:
     )
 
 
-def parse_search(data) -> list[Video]:
+def _search_sections(data):
     sections = _walk(
         data,
         "contents",
@@ -85,10 +85,12 @@ def parse_search(data) -> list[Video]:
         "sectionListRenderer",
         "contents",
     )
-    if not isinstance(sections, list):
-        return []
+    return sections if isinstance(sections, list) else []
+
+
+def parse_search(data) -> list[Video]:
     videos = []
-    for section in sections:
+    for section in _search_sections(data):
         items = _walk(section, "itemSectionRenderer", "contents")
         if not isinstance(items, list):
             continue
@@ -97,6 +99,44 @@ def parse_search(data) -> list[Video]:
             if video is not None:
                 videos.append(video)
     return videos
+
+
+def parse_search_token(data) -> str:
+    """Continuation token for the next results page: a continuationItemRenderer
+    sibling to the itemSectionRenderer sections (mirrors the comments
+    continuation pattern -- see _first_token)."""
+    for section in _search_sections(data):
+        cont = _walk(section, "continuationItemRenderer")
+        if isinstance(cont, dict):
+            token = _first_token(cont)
+            if token:
+                return token
+    return ""
+
+
+def parse_search_continuation(data) -> tuple[list[Video], str]:
+    """(videos, next_token) from a search continuation response: a
+    `{context, continuation}` POST to the same search endpoint replies with
+    onResponseReceivedCommands/appendContinuationItemsAction instead of the
+    first page's twoColumnSearchResultsRenderer shape."""
+    videos = []
+    next_token = ""
+    commands = data.get("onResponseReceivedCommands") \
+        if isinstance(data, dict) else None
+    for cmd in commands if isinstance(commands, list) else []:
+        items = _walk(cmd, "appendContinuationItemsAction", "continuationItems")
+        for item in items if isinstance(items, list) else []:
+            sec_items = _walk(item, "itemSectionRenderer", "contents")
+            for it in sec_items if isinstance(sec_items, list) else []:
+                video = _parse_video(it)
+                if video is not None:
+                    videos.append(video)
+            cont = _walk(item, "continuationItemRenderer")
+            if isinstance(cont, dict):
+                token = _first_token(cont)
+                if token:
+                    next_token = token
+    return videos, next_token
 
 
 BROWSE_URL = "https://www.youtube.com/youtubei/v1/browse"
@@ -929,12 +969,26 @@ async def subscriptions(client, bearer: str) -> list[Video]:
     return parse_subscriptions(resp.json())
 
 
-async def search(client, query: str) -> list[Video]:
-    """POST an anonymous search. `client` is the app-wide httpx.AsyncClient."""
+async def search(client, query: str) -> tuple[list[Video], str]:
+    """POST an anonymous search. `client` is the app-wide httpx.AsyncClient.
+    Returns (videos, continuation_token) -- the token feeds
+    search_continuation() for the next page (FeedModel, search only)."""
     resp = await client.post(
         SEARCH_URL,
         json={"context": CLIENT_CONTEXT, "query": query},
         headers={"content-type": "application/json"},
     )
     resp.raise_for_status()
-    return parse_search(resp.json())
+    data = resp.json()
+    return parse_search(data), parse_search_token(data)
+
+
+async def search_continuation(client, token: str) -> tuple[list[Video], str]:
+    """One more page of search results for a token from search()."""
+    resp = await client.post(
+        SEARCH_URL,
+        json={"context": CLIENT_CONTEXT, "continuation": token},
+        headers={"content-type": "application/json"},
+    )
+    resp.raise_for_status()
+    return parse_search_continuation(resp.json())

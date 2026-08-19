@@ -64,6 +64,16 @@ class RelatedModel(QObject):
                     and self._client is not None:
                 asyncio.create_task(self._fetch_thumb(v.video_id, v.thumb_url))
 
+    def related_for(self, video_id: str) -> list[tuple[str, str]]:
+        """Cached (video_id, title) pairs related to `video_id`. Never
+        triggers a fetch -- autoplay (TabManager) must not block on
+        network; empty when nothing is cached yet for this id."""
+        cached = self._cache.get(video_id)
+        if cached is None:
+            return []
+        _, _, videos = cached
+        return [(v.video_id, v.title) for v in videos]
+
     def _thumb_of(self, video_id: str) -> str:
         if self._thumbs is None:
             return ""
