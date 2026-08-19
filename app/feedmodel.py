@@ -301,7 +301,13 @@ class FeedModel(QAbstractListModel):
         except Exception as exc:
             print(f"feed: {label} failed: {exc!r}")
             return
-        print(f"feed: {len(videos)} {label} videos")
+        if videos:
+            print(f"feed: {len(videos)} {label} videos")
+        else:
+            # 0 is ambiguous: empty account feed or the parser drifted off
+            # the payload again (it has, twice) -- point at the discriminator.
+            print(f"feed: 0 {label} videos -- empty feed or parser drift;"
+                  " dump the raw response to tell")
         self._set_videos(videos)
         self._set_context(label, playlist_id=playlist_id)
 

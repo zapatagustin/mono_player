@@ -6,7 +6,9 @@ the QML source -- no window, no compositor."""
 import re
 from pathlib import Path
 
-QML = (Path(__file__).resolve().parent.parent / "qml" / "Main.qml").read_text()
+_QML_DIR = Path(__file__).resolve().parent.parent / "qml"
+QML = (_QML_DIR / "Main.qml").read_text()
+HELP = (_QML_DIR / "HelpOverlay.qml").read_text()
 
 
 def dispatched_keys():
@@ -32,6 +34,20 @@ def test_which_key_matches_dispatcher():
     assert listed_keys() == dispatched_keys()
 
 
+def test_help_close_scancodes_match_scan_table():
+    """HelpOverlay hardcodes the positional close keys (q, /) as scan
+    codes; they must stay the codes Main.qml's scanKey maps to those keys."""
+    table = re.search(r"property var scanKey: \(\{(.*?)\}\)", QML, re.S)
+    assert table, "scanKey table not found in Main.qml"
+    scan = {k: int(c) for c, k in
+            re.findall(r"(\d+): Qt\.Key_(\w+)", table.group(1))}
+    q = re.search(r"pos === (\d+)\n", HELP)  # the q check
+    slash = re.search(r"pos === (\d+) && \(event\.modifiers", HELP)
+    assert q and int(q.group(1)) == scan["Q"]
+    assert slash and int(slash.group(1)) == scan["Slash"]
+
+
 if __name__ == "__main__":
     test_which_key_matches_dispatcher()
+    test_help_close_scancodes_match_scan_table()
     print("all checks passed")
