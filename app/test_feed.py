@@ -1,10 +1,9 @@
-"""Checks for the InnerTube search parser (trust boundary: malformed data
-must degrade, never crash), the thumbnail disk LRU, and the feed cache."""
+"""Checks for the InnerTube search/next/playlist parsers (trust boundary:
+malformed data must degrade, never crash) and FeedModel's search pagination.
+Thumbnail LRU eviction is checked in app/test_thumbs.py; feed cache
+persistence is checked in app/test_feedstore.py."""
 
 import asyncio
-import os
-import tempfile
-from pathlib import Path
 
 import innertube
 from innertube import (
@@ -19,8 +18,6 @@ from innertube import (
     parse_search_token,
 )
 from feedmodel import FeedModel
-from thumbs import ThumbCache
-from feedstore import FeedStore
 
 
 def video_renderer(vid, title, channel="chan", duration="1:23", thumb="https://t/x.jpg"):
@@ -460,51 +457,6 @@ def test_playlist_parser():
     print("playlist parser: ok")
 
 
-def test_thumb_cache():
-    with tempfile.TemporaryDirectory() as tmp:
-        cache = ThumbCache(Path(tmp), max_files=3)
-
-        assert cache.get("aaaaaaaaaaa") is None
-
-        p1 = cache.put("aaaaaaaaaaa", b"1")
-        p2 = cache.put("bbbbbbbbbbb", b"2")
-        p3 = cache.put("ccccccccccc", b"3")
-        assert p1.read_bytes() == b"1"
-        assert cache.get("aaaaaaaaaaa") == p1
-
-        # Make recency deterministic: a oldest, then b, then c.
-        for i, p in enumerate([p1, p2, p3]):
-            os.utime(p, (i, i))
-
-        # Fourth insert evicts the least-recently-used (a).
-        cache.put("ddddddddddd", b"4")
-        assert cache.get("aaaaaaaaaaa") is None
-        assert cache.get("bbbbbbbbbbb") is not None
-
-        # get() refreshes recency: touch b, insert -> c evicted, b survives.
-        os.utime(cache.get("bbbbbbbbbbb"), (100, 100))
-        cache.put("eeeeeeeeeee", b"5")
-        assert cache.get("ccccccccccc") is None
-        assert cache.get("bbbbbbbbbbb") is not None
-    print("thumb cache: ok")
-
-
-def test_feed_store():
-    with tempfile.TemporaryDirectory() as tmp:
-        store = FeedStore(Path(tmp) / "mono.db")
-        assert store.load() == []
-        videos = [
-            Video("dQw4w9WgXcQ", "One", "c1", "1:23", "https://t/1.jpg"),
-            Video("aqz-KE-bpKQ", "Two", "c2", "", "https://t/2.jpg"),
-        ]
-        store.save(videos)
-        assert store.load() == videos
-        # save() replaces, order preserved.
-        store.save(list(reversed(videos)))
-        assert store.load() == list(reversed(videos))
-    print("feed store: ok")
-
-
 if __name__ == "__main__":
     test_parser()
     test_search_token_parser()
@@ -514,6 +466,4 @@ if __name__ == "__main__":
     test_playlists_list_parser()
     test_playlist_options_parser()
     test_playlist_parser()
-    test_thumb_cache()
-    test_feed_store()
     print("all checks passed")

@@ -299,7 +299,8 @@ the flake.
    before any network on cold start. Grid follows the performance rules
    (fixed cells, async Image at display size, roles-only delegates; thumb
    requests ride delegate instantiation, so visible+cacheBuffer only).
-   Parser, LRU eviction and store are checked in =app/test_feed.py=.
+   Parser is checked in =app/test_feed.py=, LRU eviction in
+   =app/test_thumbs.py=, store round-trip in =app/test_feedstore.py=.
    Verified live: search returned 20 videos, 20 thumbs cached, cold start
    painted from sqlite. Feed source is search; the "home" question stays
    open. Search continuation/pagination BUILT 2026-08-19 (see below):
