@@ -7,6 +7,7 @@ set -euo pipefail
 fail=0
 ok()   { printf '  ok    %s\n' "$1"; }
 bad()  { printf '  FAIL  %s\n' "$1"; fail=1; }
+warn() { printf '  warn  %s\n' "$1"; }
 
 if vainfo 2>/dev/null | grep -q 'VAProfileAV1Profile0.*VAEntrypointVLD'; then
   ok "AV1 hardware decode exposed by VA-API"
@@ -56,6 +57,20 @@ if [ "${XDG_SESSION_TYPE:-}" = wayland ]; then
   ok "Wayland session"
 else
   bad "not a Wayland session (XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unset})"
+fi
+
+# Stale yt-dlp pins fail loud but far from the cause: every load 403s with
+# nothing pointing at flake.nix. Offline check -- age of the dated marker only.
+pin_date=$(grep -oP 'pinned-nightly-date: \K[0-9-]+' "$(dirname "$0")/flake.nix" || true)
+if [ -n "$pin_date" ]; then
+  age_days=$(( ($(date +%s) - $(date -d "$pin_date" +%s)) / 86400 ))
+  if [ "$age_days" -le 30 ]; then
+    ok "yt-dlp nightly pin ${age_days}d old"
+  else
+    warn "yt-dlp nightly pin ${age_days}d old -- if loads 403, re-point rev+hash in flake.nix first"
+  fi
+else
+  warn "pinned-nightly-date marker missing from flake.nix"
 fi
 
 exit "$fail"
