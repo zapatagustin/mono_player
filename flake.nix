@@ -48,8 +48,104 @@
         # it in this env at runtime.
         (qasync.overridePythonAttrs (_: { doCheck = false; pythonImportsCheck = [ ]; }))
       ]);
+
+      # Shared between the dev shell and the package below, so there is one
+      # place to update when a Qt module moves. PySide6's engine does not see
+      # nixpkgs' QML modules (QtQuick.Controls et al. live in qtdeclarative's
+      # own store path; QtWebEngine -- used by the login screen only -- in
+      # qtwebengine's).
+      qmlImportPath = "${pkgs.qt6.qtdeclarative}/lib/qt-6/qml:${pkgs.qt6.qtwebengine}/lib/qt-6/qml";
+
+      # YouTube serves thumbnails as WebP; Qt needs the qtimageformats
+      # plugins to decode them (base Qt only does png/jpg/gif).
+      qtPluginPath = "${pkgs.qt6.qtimageformats}/lib/qt-6/plugins";
+
+      # The C++ QQuickItem bridge (bridge/CMakeLists.txt) builds a QML plugin
+      # only -- qt_add_qml_module emits no install() rule of its own, so the
+      # package derivation below copies its build output directory by hand
+      # rather than relying on `cmake --install`.
+      mono_player = pkgs.stdenv.mkDerivation {
+        pname = "mono_player";
+        # No version scheme in this repo yet (no tags, no pyproject.toml);
+        # the flake's own rev is the least made-up thing to call this.
+        version = self.shortRev or self.dirtyShortRev or "dev";
+        src = self;
+
+        nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.makeWrapper pkgs.patchelf ];
+        # qtdeclarative for Qt6::Quick, mpv-unwrapped.dev for the pkg-config
+        # mpv module the bridge links against.
+        buildInputs = [ pkgs.qt6.qtdeclarative pkgs.mpv-unwrapped.dev ];
+        # qtdeclarative's setup hook otherwise demands wrapQtAppsHook; this
+        # derivation ships a plain-makeWrapper wrapper instead (see
+        # installPhase), so opt out of Qt's own app-wrapping machinery.
+        dontWrapQtApps = true;
+
+        configurePhase = ''
+          cmake -S bridge -B build -DCMAKE_BUILD_TYPE=Release
+        '';
+
+        buildPhase = ''
+          # qt_add_qml_module's PLUGIN_TARGET makes "mpvbridgeplugin" (the
+          # loadable plugin qmldir points at) a separate target from the
+          # "mpvbridge" backing library it links against -- both are needed.
+          cmake --build build -j"$NIX_BUILD_CORES" --target mpvbridgeplugin
+        '';
+
+        # main.py resolves every path (app/, qml/, and the bridge's QML
+        # import path) relative to its own location, so the install layout
+        # mirrors the repo layout exactly -- no path patching needed, and
+        # the same main.py still runs unmodified from the dev shell.
+        installPhase = ''
+          runHook preInstall
+
+          dest=$out/share/mono_player
+          mkdir -p "$dest"/bridge/build
+          cp main.py "$dest"/
+          cp -r app qml "$dest"/
+          # libmpvbridgeplugin.so (in MpvBridge/) links against libmpvbridge.so
+          # (one level up, in build/) -- the same relative layout main.py's
+          # addImportPath expects is preserved here so a $ORIGIN-relative
+          # rpath below can replace the build sandbox's absolute one.
+          cp -r build/MpvBridge "$dest"/bridge/build/
+          cp build/libmpvbridge.so "$dest"/bridge/build/
+          plugin="$dest"/bridge/build/MpvBridge/libmpvbridgeplugin.so
+          old_rpath=$(patchelf --print-rpath "$plugin")
+          patchelf --set-rpath "\$ORIGIN/..:''${old_rpath#*:}" "$plugin"
+
+          mkdir -p $out/bin
+          # Plain makeWrapper, not qt6's wrapQtAppsHook: that hook wraps C++
+          # Qt binaries it finds under $out/bin, and would double-wrap this
+          # one on top of the env vars set here for a PySide6 app that has
+          # no Qt binary of its own to begin with.
+          makeWrapper ${python}/bin/python3 $out/bin/mono_player \
+            --add-flags "$dest/main.py" \
+            --prefix PATH : "${python}/bin:${pkgs.nodejs}/bin" \
+            --set QML_IMPORT_PATH "${qmlImportPath}" \
+            --set QT_PLUGIN_PATH "${qtPluginPath}"
+
+          mkdir -p $out/share/applications
+          cat > $out/share/applications/mono_player.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=mono_player
+          Exec=mono_player
+          Terminal=false
+          Categories=AudioVideo;Video;Player;
+          EOF
+
+          runHook postInstall
+        '';
+
+        meta = {
+          description = "Native Wayland YouTube client -- Qt Quick UI over libmpv";
+          mainProgram = "mono_player";
+          platforms = [ "x86_64-linux" ];
+        };
+      };
     in
     {
+      packages.${system}.default = mono_player;
+
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           python
@@ -72,14 +168,8 @@
         # has been activated. Redundant but harmless once it has: same driver.
         LIBVA_DRIVERS_PATH = "${pkgs.intel-media-driver}/lib/dri";
 
-        # PySide6's engine does not see nixpkgs' QML modules (QtQuick.Controls
-        # et al. live in qtdeclarative's own store path; QtWebEngine -- used
-        # by the login screen only -- in qtwebengine's).
-        QML_IMPORT_PATH = "${pkgs.qt6.qtdeclarative}/lib/qt-6/qml:${pkgs.qt6.qtwebengine}/lib/qt-6/qml";
-
-        # YouTube serves thumbnails as WebP; Qt needs the qtimageformats
-        # plugins to decode them (base Qt only does png/jpg/gif).
-        QT_PLUGIN_PATH = "${pkgs.qt6.qtimageformats}/lib/qt-6/plugins";
+        QML_IMPORT_PATH = qmlImportPath;
+        QT_PLUGIN_PATH = qtPluginPath;
       };
     };
 }
