@@ -207,7 +207,7 @@ def _find_renderers(node, names: frozenset):
             yield from _find_renderers(item, names)
 
 
-def _parse_playlist_video(vr) -> Video | None:
+def _parse_video_renderer(vr) -> Video | None:
     vid = vr.get("videoId")
     title = _text(vr.get("title"))
     if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) or title is None:
@@ -230,7 +230,7 @@ def parse_playlist(data) -> list[Video]:
     videos = []
     for name, vr in _find_renderers(data, _PLAYLIST_RENDERERS):
         if name == "playlistVideoRenderer":
-            video = _parse_playlist_video(vr)
+            video = _parse_video_renderer(vr)
         else:
             video = _parse_video_with_context({"videoWithContextRenderer": vr})
         if video is not None:
@@ -414,7 +414,7 @@ def parse_subscriptions(data) -> list[Video]:
     videos = []
     for name, vr in _find_renderers(data, _SUBS_RENDERERS):
         if name == "compactVideoRenderer":
-            video = _parse_playlist_video(vr)
+            video = _parse_video_renderer(vr)
         else:
             video = _parse_video_with_context({"videoWithContextRenderer": vr})
         if video is not None:
