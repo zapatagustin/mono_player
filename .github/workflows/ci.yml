@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v9
+      # check.sh is a machine-environment probe (VA-API, Wayland, Secret
+      # Service) and stays out of CI; the test suite is plain assert
+      # scripts run one by one.
+      - name: run test suite
+        run: |
+          nix develop -c bash -c '
+            set -euo pipefail
+            export QT_QPA_PLATFORM=offscreen
+            for t in app/test_*.py; do
+              echo "== $t"
+              python "$t"
+            done
+          '
