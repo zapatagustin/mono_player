@@ -383,12 +383,12 @@ Window {
                     clip: true
                     model: feed
 
-                    // Search pagination only (GUIDELINE.org): near the
-                    // bottom, ask for the next page. feed no-ops outside
-                    // a search context (no continuation token held).
+                    // Near the bottom, ask for the next page. feed no-ops
+                    // when the current surface has no continuation token
+                    // (GUIDELINE.org).
                     onContentYChanged: {
                         if (contentY + height >= contentHeight - cellHeight * 2)
-                            feed.loadMoreSearchResults()
+                            feed.loadMore()
                     }
 
                     delegate: Item {

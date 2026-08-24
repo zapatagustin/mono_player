@@ -49,6 +49,9 @@ class FeedStore:
         return [Video(*row) for row in rows]
 
     def save(self, videos: list[Video]) -> None:
+        # ecomono: rows only, no continuation token -- a cold start paints the
+        # cached rows but paginates from scratch (upgrade: persist the token
+        # per feed key alongside the rows).
         with self.db:
             self.db.execute("DELETE FROM feed_cache")
             self.db.executemany(

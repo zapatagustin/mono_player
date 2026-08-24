@@ -1,5 +1,5 @@
 """Checks for the InnerTube search/next/playlist parsers (trust boundary:
-malformed data must degrade, never crash) and FeedModel's search pagination.
+malformed data must degrade, never crash) and FeedModel's pagination.
 Thumbnail LRU eviction is checked in app/test_thumbs.py; feed cache
 persistence is checked in app/test_feedstore.py."""
 
@@ -9,6 +9,7 @@ import innertube
 from innertube import (
     PlaylistOption,
     Video,
+    parse_continuation_token,
     parse_next,
     parse_playlist,
     parse_playlist_options,
@@ -16,6 +17,7 @@ from innertube import (
     parse_search,
     parse_search_continuation,
     parse_search_token,
+    parse_subscriptions,
 )
 from feedmodel import FeedModel
 
@@ -170,6 +172,105 @@ def test_search_continuation_parser():
     print("search continuation parser: ok")
 
 
+def test_continuation_token_parser():
+    # Browse feeds: the continuationItemRenderer sits among the items, at
+    # whatever depth the client of the day nests them.
+    data = {"contents": {"deep": [{"gridVideoRenderer": {}},
+                                  continuation_item("BTOKEN")]}}
+    assert parse_continuation_token(data) == "BTOKEN"
+
+    # Legacy ANDROID shape: nextContinuationData instead.
+    assert parse_continuation_token(
+        {"continuations": [{"nextContinuationData":
+                            {"continuation": "LEGACY"}}]}) == "LEGACY"
+
+    # Last page: no continuation -> None-equivalent, the feed stops paging.
+    assert parse_continuation_token({"contents": [{"gridVideoRenderer": {}}]}) == ""
+    assert parse_continuation_token({}) == ""
+    assert parse_continuation_token(None) == ""
+    print("continuation token parser: ok")
+
+
+def test_browse_continuation_items():
+    # A browse continuation page keeps the first page's renderers, only
+    # wrapped in appendContinuationItemsAction -- so the feed's own parser
+    # (walker-based) reads it unchanged.
+    grid = {"gridVideoRenderer": {
+        "videoId": "dQw4w9WgXcQ",
+        "title": {"runs": [{"text": "Page Two"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://t/g.jpg"}]},
+    }}
+    data = {"onResponseReceivedActions": [
+        {"appendContinuationItemsAction": {"continuationItems": [
+            grid, continuation_item("NEXTTOK")]}}]}
+    _, _, videos = parse_next(data)
+    assert [v.video_id for v in videos] == ["dQw4w9WgXcQ"]
+    assert parse_continuation_token(data) == "NEXTTOK"
+
+    # Playlists page the same way; a refresh uses reloadContinuationItems-
+    # Command, and a page without a continuationItemRenderer is the last.
+    pvr = {"playlistVideoRenderer": {
+        "videoId": "aqz-KE-bpKQ",
+        "title": {"runs": [{"text": "WL Two"}]},
+        "thumbnail": {"thumbnails": [{"url": "https://t/p.jpg"}]},
+    }}
+    data2 = {"onResponseReceivedActions": [
+        {"reloadContinuationItemsCommand": {"continuationItems": [pvr]}}]}
+    assert [v.video_id for v in parse_playlist(data2)] == ["aqz-KE-bpKQ"]
+    assert parse_continuation_token(data2) == ""
+    print("browse continuation items: ok")
+
+
+def test_shorts_parser():
+    # reelItemRenderer: title in headline, no duration, no channel.
+    reel = {"reelItemRenderer": {
+        "videoId": "dQw4w9WgXcQ",
+        "headline": {"simpleText": "Reel One"},
+        "thumbnail": {"thumbnails": [{"url": "https://t/lo.jpg"},
+                                     {"url": "https://t/reel.jpg"}]},
+    }}
+    # shortsLockupViewModel: id ONLY in the reelWatchEndpoint (entityId is
+    # not a video id), title/views in overlayMetadata.
+    lockup = {"shortsLockupViewModel": {
+        "entityId": "shorts-shelf-item-Kd0Ny5Kc",
+        "onTap": {"innertubeCommand": {"reelWatchEndpoint": {
+            "videoId": "aqz-KE-bpKQ"}}},
+        "overlayMetadata": {"primaryText": {"content": "Lock Short"},
+                            "secondaryText": {"content": "1.2M views"}},
+        "thumbnail": {"sources": [{"url": "https://t/s1.jpg"},
+                                  {"url": "https://t/s2.jpg"}]},
+    }}
+
+    # Both shapes land in the feed in document order, shelf or not, marked
+    # by the duration the grid prints as-is.
+    _, _, videos = parse_next({"contents": [
+        reel, {"reelShelfRenderer": {"items": [lockup]}}]})
+    assert videos == [
+        Video("dQw4w9WgXcQ", "Reel One", "", "SHORT", "https://t/reel.jpg"),
+        Video("aqz-KE-bpKQ", "Lock Short", "", "SHORT", "https://t/s2.jpg",
+              "", "1.2M views"),
+    ], videos
+
+    # Same shapes in the subscriptions feed and in search results.
+    assert [v.video_id for v in parse_subscriptions({"x": [lockup]})] \
+        == ["aqz-KE-bpKQ"]
+    assert [v.video_id for v in parse_search(search_response(
+        [{"reelShelfRenderer": {"items": [reel]}}]))] == ["dQw4w9WgXcQ"]
+
+    # No reelWatchEndpoint -> dropped (entityId must not stand in for it).
+    no_tap = {"shortsLockupViewModel": {
+        k: v for k, v in lockup["shortsLockupViewModel"].items()
+        if k != "onTap"}}
+    assert parse_next({"a": [no_tap]})[2] == []
+
+    # Bad id shape (thumb cache filename) and garbage degrade.
+    assert parse_next({"a": [{"reelItemRenderer": {
+        "videoId": "../../evil", "headline": {"simpleText": "x"}}}]})[2] == []
+    assert parse_next({"a": [{"reelItemRenderer": {}}]})[2] == []
+    assert parse_subscriptions({"a": [{"shortsLockupViewModel": {}}]}) == []
+    print("shorts parser: ok")
+
+
 class FakeFeedStore:
     """No sqlite: just enough for FeedModel's save()/load() calls."""
 
@@ -183,10 +284,15 @@ class FakeFeedStore:
         self.saved = list(videos)
 
 
+class FakeAuth:
+    async def bearer(self):
+        return "BEARER"
+
+
 def test_feedmodel_search_pagination():
-    # Search only (GUIDELINE.org): FeedModel holds the continuation token
-    # while browsing search results, appends+dedupes on the next page, and
-    # drops the token once any other feed loads or the pages run out.
+    # FeedModel holds the continuation token while browsing search results,
+    # appends+dedupes on the next page, and drops the token once any other
+    # feed loads or the pages run out.
     real_search, real_continuation = innertube.search, innertube.search_continuation
     try:
         async def fake_search(client, query):
@@ -207,23 +313,71 @@ def test_feedmodel_search_pagination():
         model = FeedModel(client=None, store=store, cache=None)
         asyncio.run(model._search("query"))
         assert [v.video_id for v in model._videos] == ["aaaaaaaaaaa"]
-        assert model._search_token == "TOK1"
+        assert model._more_token == "TOK1"
 
-        asyncio.run(model._search_more())
+        asyncio.run(model._load_more())
         assert [v.video_id for v in model._videos] == \
             ["aaaaaaaaaaa", "bbbbbbbbbbb"]
         assert store.saved == model._videos
         # Pages exhausted -> token cleared, further calls are no-ops.
-        assert model._search_token == ""
-        model.loadMoreSearchResults()  # no token: does not touch asyncio
+        assert model._more_token == ""
+        model.loadMore()  # no token: does not touch asyncio
 
         # A non-search load (e.g. a channel open) invalidates pagination.
         model._set_videos([Video("ccccccccccc", "Three", "c", "", "")])
-        assert model._search_token == ""
+        assert model._more_token == "" and model._more_fetch is None
     finally:
         innertube.search = real_search
         innertube.search_continuation = real_continuation
     print("feedmodel search pagination: ok")
+
+
+def test_feedmodel_feed_pagination():
+    # Every feed paginates, not just search: the loader records the call for
+    # the next page, loadMore appends it, a reload drops it, and a fetch in
+    # flight makes loadMore a no-op (onContentYChanged fires per scroll pixel).
+    real_feed, real_more = innertube.account_feed, innertube.browse_continuation
+    try:
+        async def fake_feed(client, bearer, browse_id):
+            assert (bearer, browse_id) == ("BEARER", "FEwhat_to_watch")
+            return [Video("aaaaaaaaaaa", "One", "c", "1:00", "")], "TOK1"
+
+        async def fake_more(client, bearer, token):
+            assert (bearer, token) == ("BEARER", "TOK1")
+            return [Video("bbbbbbbbbbb", "Short", "", "SHORT", "")], "TOK2"
+
+        innertube.account_feed = fake_feed
+        innertube.browse_continuation = fake_more
+
+        store = FakeFeedStore()
+        model = FeedModel(client=None, store=store, cache=None,
+                          auth=FakeAuth())
+        asyncio.run(model._load_account_feed(
+            lambda c, b: innertube.account_feed(c, b, "FEwhat_to_watch"),
+            "home", more=innertube.browse_continuation))
+        assert [v.video_id for v in model._videos] == ["aaaaaaaaaaa"]
+        assert model._more_token == "TOK1"
+
+        asyncio.run(model._load_more())
+        assert [v.video_id for v in model._videos] == \
+            ["aaaaaaaaaaa", "bbbbbbbbbbb"]
+        assert model._more_token == "TOK2"
+
+        # Reentrancy guard: with a page in flight the slot bails before
+        # touching asyncio (no running loop here to create a task on).
+        model._loading_more = True
+        model.loadMore()
+        model._loading_more = False
+
+        # The playlists list has no `more`: nothing to page.
+        asyncio.run(model._load_account_feed(
+            lambda c, b: fake_feed(c, b, "FEwhat_to_watch"), "playlists"))
+        assert model._more_token == "" and model._more_fetch is None
+        model.loadMore()  # no continuation: does not touch asyncio
+    finally:
+        innertube.account_feed = real_feed
+        innertube.browse_continuation = real_more
+    print("feedmodel feed pagination: ok")
 
 
 def test_next_parser():
@@ -461,7 +615,11 @@ if __name__ == "__main__":
     test_parser()
     test_search_token_parser()
     test_search_continuation_parser()
+    test_continuation_token_parser()
+    test_browse_continuation_items()
+    test_shorts_parser()
     test_feedmodel_search_pagination()
+    test_feedmodel_feed_pagination()
     test_next_parser()
     test_playlists_list_parser()
     test_playlist_options_parser()

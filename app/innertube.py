@@ -98,6 +98,12 @@ def parse_search(data) -> list[Video]:
             video = _parse_video(item)
             if video is not None:
                 videos.append(video)
+                continue
+            # Shorts ride a reelShelfRenderer, never a videoRenderer.
+            for name, node in _find_renderers(item, _SHORTS_RENDERERS):
+                short = _parse_short(name, node)
+                if short is not None:
+                    videos.append(short)
     return videos
 
 
@@ -111,6 +117,23 @@ def parse_search_token(data) -> str:
             token = _first_token(cont)
             if token:
                 return token
+    return ""
+
+
+def parse_continuation_token(data) -> str:
+    """Continuation token for the next page of a browse feed: the first
+    continuationItemRenderer in document order, or the legacy ANDROID
+    nextContinuationData. Search keeps its own section-scoped variant above --
+    a shorts shelf inside the results carries a token of its own."""
+    for _, cont in _find_renderers(data,
+                                   frozenset({"continuationItemRenderer"})):
+        token = _first_token(cont)
+        if token:
+            return token
+    for _, cont in _find_renderers(data, frozenset({"nextContinuationData"})):
+        token = cont.get("continuation")
+        if isinstance(token, str) and token:
+            return token
     return ""
 
 
@@ -223,6 +246,39 @@ def _parse_video_renderer(vr) -> Video | None:
     )
 
 
+_SHORTS_RENDERERS = frozenset({"reelItemRenderer", "shortsLockupViewModel"})
+
+
+def _parse_short(name, node) -> Video | None:
+    """Shorts in two shapes: the legacy reelItemRenderer and the 2024+
+    shortsLockupViewModel (id only in its reelWatchEndpoint -- entityId is
+    not a video id). Neither carries a duration or a channel; "SHORT" stands
+    in as the duration, which the grid prints as-is."""
+    if name == "reelItemRenderer":
+        vid = node.get("videoId")
+        title = _text(node.get("headline"))
+        thumb = _walk(node, "thumbnail", "thumbnails", -1, "url")
+        meta = None
+    else:
+        vid = _walk(node, "onTap", "innertubeCommand", "reelWatchEndpoint",
+                    "videoId")
+        title = _walk(node, "overlayMetadata", "primaryText", "content")
+        thumb = _walk(node, "thumbnail", "sources", -1, "url")
+        meta = _walk(node, "overlayMetadata", "secondaryText", "content")
+    if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) \
+            or not isinstance(title, str):
+        return None
+    return Video(
+        vid,
+        title,
+        "",
+        "SHORT",
+        thumb if isinstance(thumb, str) else "",
+        "",
+        meta if isinstance(meta, str) else "",
+    )
+
+
 _PLAYLIST_RENDERERS = frozenset({"playlistVideoRenderer", "videoWithContextRenderer"})
 
 
@@ -250,7 +306,7 @@ def _account_headers(bearer: str) -> dict:
     return headers
 
 
-async def watch_later(client, bearer: str) -> list[Video]:
+async def watch_later(client, bearer: str) -> tuple[list[Video], str]:
     """The account's real WL playlist (browseId VL + playlist id)."""
     resp = await client.post(
         BROWSE_URL,
@@ -258,7 +314,8 @@ async def watch_later(client, bearer: str) -> list[Video]:
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
-    return parse_playlist(resp.json())
+    data = resp.json()
+    return parse_playlist(data), parse_continuation_token(data)
 
 
 async def add_to_watch_later(client, bearer: str, video_id: str) -> bool:
@@ -282,7 +339,7 @@ _NEXT_RENDERERS = frozenset({
     "compactVideoRenderer", "videoWithContextRenderer", "videoRenderer",
     "gridVideoRenderer", "lockupViewModel", "videoOwnerRenderer",
     "slimOwnerRenderer",
-})
+}) | _SHORTS_RENDERERS
 
 _TIME = re.compile(r"[\d:]+")
 
@@ -364,6 +421,8 @@ def parse_next(data) -> tuple[str, str, list[Video]]:
             continue
         if name in ("compactVideoRenderer", "gridVideoRenderer"):
             video = _parse_compact_video(node)
+        elif name in _SHORTS_RENDERERS:
+            video = _parse_short(name, node)
         elif name == "lockupViewModel":
             video = _parse_lockup(node)
         elif name == "videoRenderer":
@@ -391,7 +450,7 @@ async def related(client, video_id: str) -> tuple[str, str, list[Video]]:
 CHANNEL_VIDEOS_PARAMS = "EgZ2aWRlb3PyBgQKAjoA"
 
 
-async def channel_videos(client, browse_id: str) -> list[Video]:
+async def channel_videos(client, browse_id: str) -> tuple[list[Video], str]:
     """Anonymous channel browse (Videos tab; the defensive walker still
     finds videos if the params stop selecting the tab)."""
     resp = await client.post(
@@ -401,13 +460,15 @@ async def channel_videos(client, browse_id: str) -> list[Video]:
         headers={"content-type": "application/json"},
     )
     resp.raise_for_status()
-    _, _, videos = parse_next(resp.json())
-    return videos
+    data = resp.json()
+    _, _, videos = parse_next(data)
+    return videos, parse_continuation_token(data)
 
 
 # ANDROID now serves per-channel shelves of compactVideoRenderer (same field
 # shape as playlistVideoRenderer); videoWithContextRenderer kept as legacy.
-_SUBS_RENDERERS = frozenset({"compactVideoRenderer", "videoWithContextRenderer"})
+_SUBS_RENDERERS = frozenset({
+    "compactVideoRenderer", "videoWithContextRenderer"}) | _SHORTS_RENDERERS
 
 
 def parse_subscriptions(data) -> list[Video]:
@@ -415,6 +476,8 @@ def parse_subscriptions(data) -> list[Video]:
     for name, vr in _find_renderers(data, _SUBS_RENDERERS):
         if name == "compactVideoRenderer":
             video = _parse_video_renderer(vr)
+        elif name in _SHORTS_RENDERERS:
+            video = _parse_short(name, vr)
         else:
             video = _parse_video_with_context({"videoWithContextRenderer": vr})
         if video is not None:
@@ -728,7 +791,8 @@ def parse_playlists_list(data) -> list[Video]:
     return playlists
 
 
-async def account_feed(client, bearer: str, browse_id: str) -> list[Video]:
+async def account_feed(client, bearer: str,
+                       browse_id: str) -> tuple[list[Video], str]:
     """Authenticated ANDROID browse parsed by the generic video walker —
     home (FEwhat_to_watch) serves gridVideoRenderer, history (FEhistory)
     compactVideoRenderer."""
@@ -738,28 +802,32 @@ async def account_feed(client, bearer: str, browse_id: str) -> list[Video]:
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
-    _, _, videos = parse_next(resp.json())
-    return videos
+    data = resp.json()
+    _, _, videos = parse_next(data)
+    return videos, parse_continuation_token(data)
 
 
-async def my_playlists(client, bearer: str) -> list[Video]:
+async def my_playlists(client, bearer: str) -> tuple[list[Video], str]:
     resp = await client.post(
         BROWSE_URL,
         json={"context": _account_context(), "browseId": "FEplaylist_aggregation"},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
-    return parse_playlists_list(resp.json())
+    # The account's playlist list is one page: no continuation to follow.
+    return parse_playlists_list(resp.json()), ""
 
 
-async def playlist_videos(client, bearer: str, playlist_id: str) -> list[Video]:
+async def playlist_videos(client, bearer: str,
+                          playlist_id: str) -> tuple[list[Video], str]:
     resp = await client.post(
         BROWSE_URL,
         json={"context": _account_context(), "browseId": "VL" + playlist_id},
         headers=_account_headers(bearer),
     )
     resp.raise_for_status()
-    return parse_playlist(resp.json())
+    data = resp.json()
+    return parse_playlist(data), parse_continuation_token(data)
 
 
 @dataclass(frozen=True)
@@ -950,7 +1018,7 @@ async def subscribe(client, bearer: str, channel_id: str) -> bool:
     return True
 
 
-async def subscriptions(client, bearer: str) -> list[Video]:
+async def subscriptions(client, bearer: str) -> tuple[list[Video], str]:
     """Fetch the account's subscriptions feed. Requires a Bearer token."""
     resp = await client.post(
         BROWSE_URL,
@@ -962,13 +1030,54 @@ async def subscriptions(client, bearer: str) -> list[Video]:
         },
     )
     resp.raise_for_status()
-    return parse_subscriptions(resp.json())
+    data = resp.json()
+    return parse_subscriptions(data), parse_continuation_token(data)
+
+
+async def _browse_page(client, token: str, bearer: str | None) -> dict:
+    """POST `browse {continuation}`: one more page of any browse feed.
+    Authenticated ANDROID with a bearer (account feeds), anonymous WEB
+    without one (channel browse). Continuation items arrive under
+    onResponseReceivedActions instead of contents, but every feed parser
+    walks for renderers at any depth, so the raw response feeds the first
+    page's parser unchanged."""
+    context, headers = ((_account_context(), _account_headers(bearer))
+                        if bearer else
+                        (WEB_CONTEXT, {"content-type": "application/json"}))
+    resp = await client.post(
+        BROWSE_URL,
+        json={"context": context, "continuation": token},
+        headers=headers,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def browse_continuation(client, bearer: str | None,
+                              token: str) -> tuple[list[Video], str]:
+    """Next page of a walker-parsed browse feed: home, history, channel."""
+    data = await _browse_page(client, token, bearer)
+    _, _, videos = parse_next(data)
+    return videos, parse_continuation_token(data)
+
+
+async def playlist_continuation(client, bearer: str,
+                                token: str) -> tuple[list[Video], str]:
+    """Next page of a playlist feed: watch later, or one of the account's."""
+    data = await _browse_page(client, token, bearer)
+    return parse_playlist(data), parse_continuation_token(data)
+
+
+async def subscriptions_continuation(client, bearer: str,
+                                     token: str) -> tuple[list[Video], str]:
+    data = await _browse_page(client, token, bearer)
+    return parse_subscriptions(data), parse_continuation_token(data)
 
 
 async def search(client, query: str) -> tuple[list[Video], str]:
     """POST an anonymous search. `client` is the app-wide httpx.AsyncClient.
     Returns (videos, continuation_token) -- the token feeds
-    search_continuation() for the next page (FeedModel, search only)."""
+    search_continuation() for the next page."""
     resp = await client.post(
         SEARCH_URL,
         json={"context": CLIENT_CONTEXT, "query": query},

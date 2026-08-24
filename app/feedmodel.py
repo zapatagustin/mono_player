@@ -40,9 +40,11 @@ class FeedModel(QAbstractListModel):
         self._context_playlist_id = ""
         self._thumbs: dict[str, str] = {}  # video_id -> local file URL
         self._pending: set[str] = set()
-        # Search-only pagination (GUIDELINE.org): the continuation token for
-        # the current search, cleared by any non-append feed load.
-        self._search_token = ""
+        # Pagination for whichever feed is loaded (GUIDELINE.org): its
+        # continuation token plus the call that fetches the next page, both
+        # cleared by any non-append feed load.
+        self._more_token = ""
+        self._more_fetch = None  # (token) -> (videos, next_token)
         self._loading_more = False
         # Cold start: paint the cached feed before any network.
         self._videos: list[Video] = store.load()
@@ -101,11 +103,15 @@ class FeedModel(QAbstractListModel):
             asyncio.create_task(self._search(query))
 
     @Slot()
-    def loadMoreSearchResults(self):
-        """Called from QML when the grid scrolls near the end. Search only
-        (GUIDELINE.org: deliberate YAGNI for home/subs/history)."""
-        if self._search_token and not self._loading_more:
-            asyncio.create_task(self._search_more())
+    def loadMore(self):
+        """Called from QML when the grid scrolls near the end: no-op unless
+        the current feed has a continuation and none is already in flight
+        (onContentYChanged fires repeatedly while scrolling)."""
+        if self._more_token and self._more_fetch and not self._loading_more:
+            # Flagged here, not in the task: several signals can land before
+            # the loop runs the coroutine.
+            self._loading_more = True
+            asyncio.create_task(self._load_more())
 
     @Slot(str)
     def requestThumb(self, video_id: str):
@@ -134,12 +140,16 @@ class FeedModel(QAbstractListModel):
 
     async def _load_channel(self, browse_id: str, name: str):
         try:
-            videos = await innertube.channel_videos(self._client, browse_id)
+            videos, token = await innertube.channel_videos(
+                self._client, browse_id)
         except Exception as exc:
             print(f"feed: channel failed: {exc!r}")
             return
         print(f"feed: {len(videos)} channel videos")
         self._set_videos(videos)
+        # Channel browse is anonymous: no bearer on its continuation either.
+        self._set_more(token, lambda t: innertube.browse_continuation(
+            self._client, None, t))
         self._set_context("channel: " + (name or browse_id), browse_id)
 
     @Slot(str)
@@ -216,25 +226,27 @@ class FeedModel(QAbstractListModel):
     def loadWatchLater(self):
         if self._auth is not None:
             asyncio.create_task(self._load_account_feed(
-                innertube.watch_later, "watch later", playlist_id="WL"))
+                innertube.watch_later, "watch later", playlist_id="WL",
+                more=innertube.playlist_continuation))
 
     @Slot()
     def loadHome(self):
         if self._auth is not None:
             asyncio.create_task(self._load_account_feed(
                 lambda c, b: innertube.account_feed(c, b, "FEwhat_to_watch"),
-                "home"))
+                "home", more=innertube.browse_continuation))
 
     @Slot()
     def loadHistory(self):
         if self._auth is not None:
             asyncio.create_task(self._load_account_feed(
                 lambda c, b: innertube.account_feed(c, b, "FEhistory"),
-                "history"))
+                "history", more=innertube.browse_continuation))
 
     @Slot()
     def loadPlaylists(self):
         if self._auth is not None:
+            # The playlist list is a single page: no `more`.
             asyncio.create_task(self._load_account_feed(
                 innertube.my_playlists, "playlists"))
 
@@ -243,7 +255,8 @@ class FeedModel(QAbstractListModel):
         if playlist_id and self._auth is not None:
             asyncio.create_task(self._load_account_feed(
                 lambda c, b: innertube.playlist_videos(c, b, playlist_id),
-                "playlist", playlist_id=playlist_id))
+                "playlist", playlist_id=playlist_id,
+                more=innertube.playlist_continuation))
 
     @Slot(str)
     def addToWatchLater(self, video_id: str):
@@ -269,35 +282,37 @@ class FeedModel(QAbstractListModel):
             return
         print(f"feed: {len(videos)} videos for {query!r}")
         self._set_videos(videos)
-        self._search_token = token
+        self._set_more(token, lambda t: innertube.search_continuation(
+            self._client, t))
         self._set_context("search: " + query)
 
-    async def _search_more(self):
-        token = self._search_token
+    async def _load_more(self):
+        token, fetch = self._more_token, self._more_fetch
         self._loading_more = True
         try:
-            videos, next_token = await innertube.search_continuation(
-                self._client, token)
+            videos, next_token = await fetch(token)
         except Exception as exc:
-            print(f"feed: search continuation failed: {exc!r}")
-            self._loading_more = False
+            print(f"feed: continuation failed: {exc!r}")
             return
-        self._loading_more = False
-        self._search_token = next_token
+        finally:
+            self._loading_more = False
+        self._more_token = next_token
         print(f"feed: {len(videos)} more videos (continuation)")
         self._append_videos(videos)
 
     async def _load_subscriptions(self):
-        await self._load_account_feed(innertube.subscriptions, "subscriptions")
+        await self._load_account_feed(
+            innertube.subscriptions, "subscriptions",
+            more=innertube.subscriptions_continuation)
 
     async def _load_account_feed(self, fetch, label: str,
-                                 playlist_id: str = ""):
+                                 playlist_id: str = "", more=None):
         bearer = await self._auth.bearer()
         if bearer is None:
             print(f"feed: {label} needs login")
             return
         try:
-            videos = await fetch(self._client, bearer)
+            videos, token = await fetch(self._client, bearer)
         except Exception as exc:
             print(f"feed: {label} failed: {exc!r}")
             return
@@ -309,6 +324,8 @@ class FeedModel(QAbstractListModel):
             print(f"feed: 0 {label} videos -- empty feed or parser drift;"
                   " dump the raw response to tell")
         self._set_videos(videos)
+        if more is not None:
+            self._set_more(token, lambda t: more(self._client, bearer, t))
         self._set_context(label, playlist_id=playlist_id)
 
     async def _add_watch_later(self, video_id: str):
@@ -352,12 +369,17 @@ class FeedModel(QAbstractListModel):
         self._videos = videos
         self.endResetModel()
         self._store.save(videos)
-        # Any full reload invalidates search pagination; _search() re-sets
-        # the token right after this, for the search path only.
-        self._search_token = ""
+        # Any full reload invalidates pagination; the loader re-sets the
+        # continuation right after this, for the feeds that have one.
+        self._more_token = ""
+        self._more_fetch = None
+
+    def _set_more(self, token: str, fetch):
+        self._more_token = token
+        self._more_fetch = fetch
 
     def _append_videos(self, videos):
-        """Append a search continuation page, deduped by video_id -- YouTube
+        """Append a continuation page, deduped by video_id -- YouTube
         repeats items across pages (GUIDELINE.org)."""
         existing = {v.video_id for v in self._videos}
         new = [v for v in videos if v.video_id not in existing]

@@ -266,8 +266,11 @@ End-to-end confirmed: real 4K60 AV1 from YouTube plays with
   later. Logged out, home stays the last cached feed + search — the
   anonymous-home story (trending died mid-2025) remains unbuilt until
   someone logged-out asks for it. Shorts have no parseable dedicated
-  feed (elementRenderer protobufs); the ones in home appear as normal
-  videos.
+  feed (elementRenderer protobufs), but the ones inside the normal feeds
+  are parsed since 2026-08-24: =reelItemRenderer= and
+  =shortsLockupViewModel= map to the same =Video= as any other item, in
+  feed order, with duration ="SHORT"= (they carry none) -- playback needs
+  nothing special, the id is a normal watch id.
 
 * Status / next steps
 
@@ -303,8 +306,9 @@ the flake.
    =app/test_thumbs.py=, store round-trip in =app/test_feedstore.py=.
    Verified live: search returned 20 videos, 20 thumbs cached, cold start
    painted from sqlite. Feed source is search; the "home" question stays
-   open. Search continuation/pagination BUILT 2026-08-19 (see below):
-   what was skipped as YAGNI here now has a call site.
+   open. Continuation/pagination BUILT 2026-08-19, generalized to every
+   feed 2026-08-24 (see below): what was skipped as YAGNI here now has a
+   call site.
 3. DONE (2026-08-10). Tabs in =app/tabstore.py= (tables =tabs=,
    =queue_items=, =meta.active_tab=; FK cascade) + =app/tabmanager.py=
    (strip model, pure =materialize()=: current item =loadfile replace=
@@ -364,17 +368,26 @@ the flake.
    frame rendered in <1ms (the FBO blit; compositing is Hyprland's job).
    Chromium ran as installed — no VAAPI flags — which is the honest
    comparison: that IS Chrome-on-Linux as people run it.
-7. DONE (2026-08-19). Search pagination: =innertube.search()= now returns
-   =(videos, continuation_token)= (mirrors the comments continuation
-   pattern -- =parse_search_token=/=parse_search_continuation=), and
-   =search_continuation(client, token)= fetches the next page. =FeedModel=
-   holds the token only while the surface is search (any other load clears
-   it, in =_set_videos=); the QML grid's =onContentYChanged= calls
-   =loadMoreSearchResults()= near the bottom, and new rows are appended
-   (not reset) deduped by =video_id= against what's already loaded --
-   InnerTube repeats items across pages. Deliberately search-only, not
-   generalized to home/subs/history (still YAGNI there). Checked in
-   =app/test_feed.py=.
+7. DONE (2026-08-19, generalized 2026-08-24). Feed pagination, every
+   surface: search, home, subscriptions, history, channel, watch later and
+   playlists all return =(videos, continuation_token)= (mirrors the comments
+   continuation pattern), and one of =search_continuation= /
+   =browse_continuation= (walker feeds) / =playlist_continuation= /
+   =subscriptions_continuation= fetches the next page -- all four POST
+   =({context, continuation})= and hand the raw response to the SAME parser
+   as the first page, since continuation renderers keep their shape and the
+   walkers find them under =onResponseReceivedActions= too.
+   =parse_continuation_token= walks for the first =continuationItemRenderer=
+   (legacy =nextContinuationData= as fallback); search keeps its
+   section-scoped =parse_search_token= so a shorts shelf's own token can't
+   be mistaken for the results' one. =FeedModel= holds
+   =(_more_token, _more_fetch)= for whatever surface is loaded, cleared by
+   any non-append load (=_set_videos=); the QML grid's =onContentYChanged=
+   calls =loadMore()= near the bottom, which no-ops without a token or with
+   a fetch in flight, and new rows are appended (not reset) deduped by
+   =video_id= -- InnerTube repeats items across pages. The sqlite feed cache
+   stores rows only, not the token: a cold start paints cached rows and
+   paginates from scratch. Checked in =app/test_feed.py=.
 8. DONE (2026-08-19). Autoplay on queue exhaustion: opt-in, session-only,
    per-app (not per-tab) flag on =TabManager= (=autoplay= property,
    =toggleAutoplay()=, key =n= in both browse and watch modes -- positional
