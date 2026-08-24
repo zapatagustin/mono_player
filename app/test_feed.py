@@ -184,6 +184,15 @@ def test_continuation_token_parser():
         {"continuations": [{"nextContinuationData":
                             {"continuation": "LEGACY"}}]}) == "LEGACY"
 
+    # A shelf inside the feed pages itself; the feed-level token is appended
+    # after the item list, so the LAST one in document order wins.
+    data = {"contents": [
+        {"reelShelfRenderer": {"items": [continuation_item("SHELF")]}},
+        {"gridVideoRenderer": {}},
+        continuation_item("FEED"),
+    ]}
+    assert parse_continuation_token(data) == "FEED"
+
     # Last page: no continuation -> None-equivalent, the feed stops paging.
     assert parse_continuation_token({"contents": [{"gridVideoRenderer": {}}]}) == ""
     assert parse_continuation_token({}) == ""
@@ -257,6 +266,14 @@ def test_shorts_parser():
     assert [v.video_id for v in parse_search(search_response(
         [{"reelShelfRenderer": {"items": [reel]}}]))] == ["dQw4w9WgXcQ"]
 
+    # Search continuation pages parse shorts too (page-1 parity).
+    cont = {"onResponseReceivedCommands": [
+        {"appendContinuationItemsAction": {"continuationItems": [
+            {"itemSectionRenderer": {"contents": [
+                {"reelShelfRenderer": {"items": [reel]}}]}}]}}]}
+    vids, _ = parse_search_continuation(cont)
+    assert [v.video_id for v in vids] == ["dQw4w9WgXcQ"]
+
     # No reelWatchEndpoint -> dropped (entityId must not stand in for it).
     no_tap = {"shortsLockupViewModel": {
         k: v for k, v in lockup["shortsLockupViewModel"].items()
@@ -283,10 +300,22 @@ class FakeFeedStore:
     def save(self, videos):
         self.saved = list(videos)
 
+    def append(self, videos, start):
+        # Append-only contract: continuation rows land after the saved ones.
+        assert start == len(self.saved), (start, len(self.saved))
+        self.saved = self.saved + list(videos)
+
 
 class FakeAuth:
+    """Counts bearer() calls and mints a fresh token each time -- pagination
+    must resolve the bearer per page, never freeze the first-page one."""
+
+    def __init__(self):
+        self.calls = 0
+
     async def bearer(self):
-        return "BEARER"
+        self.calls += 1
+        return f"BEARER{self.calls}"
 
 
 def test_feedmodel_search_pagination():
@@ -313,19 +342,19 @@ def test_feedmodel_search_pagination():
         model = FeedModel(client=None, store=store, cache=None)
         asyncio.run(model._search("query"))
         assert [v.video_id for v in model._videos] == ["aaaaaaaaaaa"]
-        assert model._more_token == "TOK1"
+        assert model._more[0] == "TOK1"
 
         asyncio.run(model._load_more())
         assert [v.video_id for v in model._videos] == \
             ["aaaaaaaaaaa", "bbbbbbbbbbb"]
         assert store.saved == model._videos
-        # Pages exhausted -> token cleared, further calls are no-ops.
-        assert model._more_token == ""
-        model.loadMore()  # no token: does not touch asyncio
+        # Pages exhausted -> continuation cleared, further calls are no-ops.
+        assert model._more is None
+        model.loadMore()  # no continuation: does not touch asyncio
 
         # A non-search load (e.g. a channel open) invalidates pagination.
         model._set_videos([Video("ccccccccccc", "Three", "c", "", "")])
-        assert model._more_token == "" and model._more_fetch is None
+        assert model._more is None
     finally:
         innertube.search = real_search
         innertube.search_continuation = real_continuation
@@ -339,11 +368,12 @@ def test_feedmodel_feed_pagination():
     real_feed, real_more = innertube.account_feed, innertube.browse_continuation
     try:
         async def fake_feed(client, bearer, browse_id):
-            assert (bearer, browse_id) == ("BEARER", "FEwhat_to_watch")
+            assert (bearer, browse_id) == ("BEARER1", "FEwhat_to_watch")
             return [Video("aaaaaaaaaaa", "One", "c", "1:00", "")], "TOK1"
 
         async def fake_more(client, bearer, token):
-            assert (bearer, token) == ("BEARER", "TOK1")
+            # Fresh bearer per page: the first-page one expires on screen.
+            assert (bearer, token) == ("BEARER2", "TOK1")
             return [Video("bbbbbbbbbbb", "Short", "", "SHORT", "")], "TOK2"
 
         innertube.account_feed = fake_feed
@@ -356,12 +386,12 @@ def test_feedmodel_feed_pagination():
             lambda c, b: innertube.account_feed(c, b, "FEwhat_to_watch"),
             "home", more=innertube.browse_continuation))
         assert [v.video_id for v in model._videos] == ["aaaaaaaaaaa"]
-        assert model._more_token == "TOK1"
+        assert model._more[0] == "TOK1"
 
         asyncio.run(model._load_more())
         assert [v.video_id for v in model._videos] == \
             ["aaaaaaaaaaa", "bbbbbbbbbbb"]
-        assert model._more_token == "TOK2"
+        assert model._more[0] == "TOK2"
 
         # Reentrancy guard: with a page in flight the slot bails before
         # touching asyncio (no running loop here to create a task on).
@@ -370,14 +400,41 @@ def test_feedmodel_feed_pagination():
         model._loading_more = False
 
         # The playlists list has no `more`: nothing to page.
-        asyncio.run(model._load_account_feed(
-            lambda c, b: fake_feed(c, b, "FEwhat_to_watch"), "playlists"))
-        assert model._more_token == "" and model._more_fetch is None
+        async def fake_single(client, bearer):
+            return [Video("aaaaaaaaaaa", "One", "c", "1:00", "")], "TOK1"
+        asyncio.run(model._load_account_feed(fake_single, "playlists"))
+        assert model._more is None
         model.loadMore()  # no continuation: does not touch asyncio
     finally:
         innertube.account_feed = real_feed
         innertube.browse_continuation = real_more
     print("feedmodel feed pagination: ok")
+
+
+def test_feedmodel_stale_continuation():
+    # A continuation resolving after another feed loaded must not append its
+    # rows into the new feed nor resurrect its token: _load_more drops the
+    # page when self._more changed identity during the await.
+    store = FakeFeedStore()
+    model = FeedModel(client=None, store=store, cache=None)
+
+    async def fetch_b(token):
+        raise AssertionError("feed B's continuation must not run here")
+
+    async def fetch_a(token):
+        # Feed B lands while A's page is in flight.
+        model._set_videos([Video("ccccccccccc", "B One", "c", "", "")])
+        model._set_more("BTOK", fetch_b)
+        return [Video("ddddddddddd", "A Two", "c", "", "")], "ATOK2"
+
+    model._set_videos([Video("aaaaaaaaaaa", "A One", "c", "", "")])
+    model._set_more("ATOK", fetch_a)
+    asyncio.run(model._load_more())
+    # A's page dropped; B's rows and continuation intact.
+    assert [v.video_id for v in model._videos] == ["ccccccccccc"]
+    assert model._more == ("BTOK", fetch_b)
+    assert store.saved == model._videos
+    print("feedmodel stale continuation: ok")
 
 
 def test_next_parser():
@@ -620,6 +677,7 @@ if __name__ == "__main__":
     test_shorts_parser()
     test_feedmodel_search_pagination()
     test_feedmodel_feed_pagination()
+    test_feedmodel_stale_continuation()
     test_next_parser()
     test_playlists_list_parser()
     test_playlist_options_parser()

@@ -88,22 +88,27 @@ def _search_sections(data):
     return sections if isinstance(sections, list) else []
 
 
+def _parse_search_items(items, videos: list) -> None:
+    """One itemSectionRenderer's contents into `videos` -- shared by the
+    first page and continuation pages."""
+    for item in items:
+        video = _parse_video(item)
+        if video is not None:
+            videos.append(video)
+            continue
+        # Shorts ride a reelShelfRenderer, never a videoRenderer.
+        for name, node in _find_renderers(item, _SHORTS_RENDERERS):
+            short = _parse_short(name, node)
+            if short is not None:
+                videos.append(short)
+
+
 def parse_search(data) -> list[Video]:
     videos = []
     for section in _search_sections(data):
         items = _walk(section, "itemSectionRenderer", "contents")
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            video = _parse_video(item)
-            if video is not None:
-                videos.append(video)
-                continue
-            # Shorts ride a reelShelfRenderer, never a videoRenderer.
-            for name, node in _find_renderers(item, _SHORTS_RENDERERS):
-                short = _parse_short(name, node)
-                if short is not None:
-                    videos.append(short)
+        if isinstance(items, list):
+            _parse_search_items(items, videos)
     return videos
 
 
@@ -121,20 +126,23 @@ def parse_search_token(data) -> str:
 
 
 def parse_continuation_token(data) -> str:
-    """Continuation token for the next page of a browse feed: the first
-    continuationItemRenderer in document order, or the legacy ANDROID
-    nextContinuationData. Search keeps its own section-scoped variant above --
-    a shorts shelf inside the results carries a token of its own."""
+    """Continuation token for the next page of a browse feed: the LAST
+    continuationItemRenderer in document order -- a shelf inside the feed
+    (shorts shelves page themselves) carries its own token, but the
+    feed-level one is appended after the item list, so last wins. Legacy
+    ANDROID nextContinuationData as fallback. Search keeps its own
+    section-scoped variant above."""
+    token = ""
     for _, cont in _find_renderers(data,
                                    frozenset({"continuationItemRenderer"})):
-        token = _first_token(cont)
-        if token:
-            return token
+        token = _first_token(cont) or token
+    if token:
+        return token
     for _, cont in _find_renderers(data, frozenset({"nextContinuationData"})):
-        token = cont.get("continuation")
-        if isinstance(token, str) and token:
-            return token
-    return ""
+        t = cont.get("continuation")
+        if isinstance(t, str) and t:
+            token = t
+    return token
 
 
 def parse_search_continuation(data) -> tuple[list[Video], str]:
@@ -150,10 +158,8 @@ def parse_search_continuation(data) -> tuple[list[Video], str]:
         items = _walk(cmd, "appendContinuationItemsAction", "continuationItems")
         for item in items if isinstance(items, list) else []:
             sec_items = _walk(item, "itemSectionRenderer", "contents")
-            for it in sec_items if isinstance(sec_items, list) else []:
-                video = _parse_video(it)
-                if video is not None:
-                    videos.append(video)
+            if isinstance(sec_items, list):
+                _parse_search_items(sec_items, videos)
             cont = _walk(item, "continuationItemRenderer")
             if isinstance(cont, dict):
                 token = _first_token(cont)
@@ -404,6 +410,20 @@ def _parse_compact_video(vr) -> Video | None:
     )
 
 
+def _parse_item(name, node) -> Video | None:
+    """One (renderer name, node) from a feed walker to its parser -- the
+    single dispatch point, so a new renderer shape lands in every feed."""
+    if name in ("compactVideoRenderer", "gridVideoRenderer"):
+        return _parse_compact_video(node)
+    if name in _SHORTS_RENDERERS:
+        return _parse_short(name, node)
+    if name == "lockupViewModel":
+        return _parse_lockup(node)
+    if name == "videoRenderer":
+        return _parse_video({name: node})
+    return _parse_video_with_context({name: node})
+
+
 def parse_next(data) -> tuple[str, str, list[Video]]:
     """(owner channel id, owner name, related videos) from a `next`
     response. Everything degrades to empty on shape mismatch."""
@@ -419,16 +439,7 @@ def parse_next(data) -> tuple[str, str, list[Video]]:
                 owner_id = bid or ""
                 owner_name = _text(node.get("title")) or ""
             continue
-        if name in ("compactVideoRenderer", "gridVideoRenderer"):
-            video = _parse_compact_video(node)
-        elif name in _SHORTS_RENDERERS:
-            video = _parse_short(name, node)
-        elif name == "lockupViewModel":
-            video = _parse_lockup(node)
-        elif name == "videoRenderer":
-            video = _parse_video({name: node})
-        else:
-            video = _parse_video_with_context({name: node})
+        video = _parse_item(name, node)
         if video is not None:
             related_videos.append(video)
     return owner_id, owner_name, related_videos
@@ -474,12 +485,7 @@ _SUBS_RENDERERS = frozenset({
 def parse_subscriptions(data) -> list[Video]:
     videos = []
     for name, vr in _find_renderers(data, _SUBS_RENDERERS):
-        if name == "compactVideoRenderer":
-            video = _parse_video_renderer(vr)
-        elif name in _SHORTS_RENDERERS:
-            video = _parse_short(name, vr)
-        else:
-            video = _parse_video_with_context({"videoWithContextRenderer": vr})
+        video = _parse_item(name, vr)
         if video is not None:
             videos.append(video)
     return videos
@@ -675,10 +681,10 @@ def parse_android_comments_token(data) -> str:
     return ""
 
 
-def _comments_request(token_or_video: dict, bearer: str | None) -> tuple:
-    """(context, headers) for a comments call: authenticated ANDROID when a
-    bearer is available (toolbars carry real like actions), anonymous WEB
-    otherwise."""
+def _request_context(bearer: str | None) -> tuple:
+    """(context, headers) for an InnerTube call: authenticated ANDROID when
+    a bearer is available (comment toolbars carry real like actions),
+    anonymous WEB otherwise. Shared by comments and browse continuations."""
     if bearer:
         return _account_context(), _account_headers(bearer)
     return WEB_CONTEXT, {"content-type": "application/json"}
@@ -688,7 +694,7 @@ async def comments_page(client, token: str,
                         bearer: str | None = None) -> tuple[list[Comment], str]:
     """One `next {continuation}` call: a further comments page, or a
     comment's replies (same endpoint, thread-less response)."""
-    context, headers = _comments_request({}, bearer)
+    context, headers = _request_context(bearer)
     resp = await client.post(
         NEXT_URL,
         json={"context": context, "continuation": token},
@@ -702,7 +708,7 @@ async def comments(client, video_id: str,
                    bearer: str | None = None) -> tuple[list[Comment], str]:
     """Top-level comments, first page: `next` for the section token, then
     the continuation for the payloads."""
-    context, headers = _comments_request({}, bearer)
+    context, headers = _request_context(bearer)
     resp = await client.post(
         NEXT_URL,
         json={"context": context, "videoId": video_id},

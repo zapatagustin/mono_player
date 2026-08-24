@@ -377,16 +377,21 @@ the flake.
    =({context, continuation})= and hand the raw response to the SAME parser
    as the first page, since continuation renderers keep their shape and the
    walkers find them under =onResponseReceivedActions= too.
-   =parse_continuation_token= walks for the first =continuationItemRenderer=
-   (legacy =nextContinuationData= as fallback); search keeps its
-   section-scoped =parse_search_token= so a shorts shelf's own token can't
-   be mistaken for the results' one. =FeedModel= holds
-   =(_more_token, _more_fetch)= for whatever surface is loaded, cleared by
-   any non-append load (=_set_videos=); the QML grid's =onContentYChanged=
-   calls =loadMore()= near the bottom, which no-ops without a token or with
-   a fetch in flight, and new rows are appended (not reset) deduped by
+   =parse_continuation_token= walks for the LAST =continuationItemRenderer=
+   in document order (a shelf inside the feed pages itself; the feed-level
+   token is appended after the item list; legacy =nextContinuationData= as
+   fallback); search keeps its section-scoped =parse_search_token=.
+   =FeedModel= holds one =_more= = (token, fetch) tuple for whatever surface
+   is loaded, replaced by any non-append load (=_set_videos=) -- an
+   in-flight continuation detects it went stale by identity and drops its
+   page instead of appending into the new feed. Account-feed continuations
+   resolve =auth.bearer()= per page (the first-page bearer expires ~50 min
+   while the feed sits on screen). The QML grid's =onContentYChanged= calls
+   =loadMore()= near the bottom, which no-ops without a continuation or
+   with a fetch in flight, and new rows are appended (not reset) deduped by
    =video_id= -- InnerTube repeats items across pages. The sqlite feed cache
-   stores rows only, not the token: a cold start paints cached rows and
+   stores rows only, not the token (continuation pages INSERT just the new
+   rows; full =save()= only on reset): a cold start paints cached rows and
    paginates from scratch. Checked in =app/test_feed.py=.
 8. DONE (2026-08-19). Autoplay on queue exhaustion: opt-in, session-only,
    per-app (not per-tab) flag on =TabManager= (=autoplay= property,

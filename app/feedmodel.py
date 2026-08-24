@@ -40,11 +40,11 @@ class FeedModel(QAbstractListModel):
         self._context_playlist_id = ""
         self._thumbs: dict[str, str] = {}  # video_id -> local file URL
         self._pending: set[str] = set()
-        # Pagination for whichever feed is loaded (GUIDELINE.org): its
-        # continuation token plus the call that fetches the next page, both
-        # cleared by any non-append feed load.
-        self._more_token = ""
-        self._more_fetch = None  # (token) -> (videos, next_token)
+        # Pagination for whichever feed is loaded (GUIDELINE.org):
+        # (continuation token, call fetching the next page) or None, replaced
+        # by any non-append feed load -- one value, so an in-flight
+        # continuation can detect it went stale by identity.
+        self._more = None  # (token, (token) -> (videos, next_token)) | None
         self._loading_more = False
         # Cold start: paint the cached feed before any network.
         self._videos: list[Video] = store.load()
@@ -107,7 +107,7 @@ class FeedModel(QAbstractListModel):
         """Called from QML when the grid scrolls near the end: no-op unless
         the current feed has a continuation and none is already in flight
         (onContentYChanged fires repeatedly while scrolling)."""
-        if self._more_token and self._more_fetch and not self._loading_more:
+        if self._more is not None and not self._loading_more:
             # Flagged here, not in the task: several signals can land before
             # the loop runs the coroutine.
             self._loading_more = True
@@ -287,8 +287,11 @@ class FeedModel(QAbstractListModel):
         self._set_context("search: " + query)
 
     async def _load_more(self):
-        token, fetch = self._more_token, self._more_fetch
-        self._loading_more = True
+        more = self._more
+        if more is None:  # cleared between the slot firing and this running
+            self._loading_more = False
+            return
+        token, fetch = more
         try:
             videos, next_token = await fetch(token)
         except Exception as exc:
@@ -296,7 +299,12 @@ class FeedModel(QAbstractListModel):
             return
         finally:
             self._loading_more = False
-        self._more_token = next_token
+        # Stale-continuation guard (same idea as _remove_from_playlist):
+        # another feed may have loaded during the await -- these rows and
+        # this token belong to the old feed, not the one on screen.
+        if self._more is not more:
+            return
+        self._more = (next_token, fetch) if next_token else None
         print(f"feed: {len(videos)} more videos (continuation)")
         self._append_videos(videos)
 
@@ -325,7 +333,14 @@ class FeedModel(QAbstractListModel):
                   " dump the raw response to tell")
         self._set_videos(videos)
         if more is not None:
-            self._set_more(token, lambda t: more(self._client, bearer, t))
+            async def fetch_more(t):
+                # Bearer resolved per page: the first-page one expires while
+                # the feed stays on screen (auth re-mints on demand).
+                fresh = await self._auth.bearer()
+                if fresh is None:
+                    raise RuntimeError("login required")
+                return await more(self._client, fresh, t)
+            self._set_more(token, fetch_more)
         self._set_context(label, playlist_id=playlist_id)
 
     async def _add_watch_later(self, video_id: str):
@@ -371,12 +386,10 @@ class FeedModel(QAbstractListModel):
         self._store.save(videos)
         # Any full reload invalidates pagination; the loader re-sets the
         # continuation right after this, for the feeds that have one.
-        self._more_token = ""
-        self._more_fetch = None
+        self._more = None
 
     def _set_more(self, token: str, fetch):
-        self._more_token = token
-        self._more_fetch = fetch
+        self._more = (token, fetch) if token else None
 
     def _append_videos(self, videos):
         """Append a continuation page, deduped by video_id -- YouTube
@@ -389,7 +402,7 @@ class FeedModel(QAbstractListModel):
         self.beginInsertRows(QModelIndex(), start, start + len(new) - 1)
         self._videos.extend(new)
         self.endInsertRows()
-        self._store.save(self._videos)
+        self._store.append(new, start)
 
     async def _fetch_thumb(self, video_id: str, url: str):
         try:

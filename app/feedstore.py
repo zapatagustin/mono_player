@@ -24,6 +24,17 @@ _TABLE_BODY = """(
     playlist_id TEXT NOT NULL DEFAULT ''
 )"""
 
+_INSERT = (f"INSERT INTO feed_cache (pos, {', '.join(_COLUMNS)})"
+           f" VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})")
+
+
+def _rows(videos: list[Video], start: int = 0) -> list[tuple]:
+    return [
+        (start + i, v.video_id, v.title, v.channel, v.duration, v.thumb_url,
+         v.channel_id, v.meta, v.playlist_id)
+        for i, v in enumerate(videos)
+    ]
+
 
 class FeedStore:
     def __init__(self, db_path: Path):
@@ -54,12 +65,10 @@ class FeedStore:
         # per feed key alongside the rows).
         with self.db:
             self.db.execute("DELETE FROM feed_cache")
-            self.db.executemany(
-                f"INSERT INTO feed_cache (pos, {', '.join(_COLUMNS)})"
-                f" VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})",
-                [
-                    (i, v.video_id, v.title, v.channel, v.duration, v.thumb_url,
-                     v.channel_id, v.meta, v.playlist_id)
-                    for i, v in enumerate(videos)
-                ],
-            )
+            self.db.executemany(_INSERT, _rows(videos))
+
+    def append(self, videos: list[Video], start: int) -> None:
+        """Continuation pages: insert only the new rows after `start` --
+        save() rewrites the whole cache, O(feed) per page while scrolling."""
+        with self.db:
+            self.db.executemany(_INSERT, _rows(videos, start))

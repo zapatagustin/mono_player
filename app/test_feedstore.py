@@ -24,6 +24,10 @@ def test_feed_store_round_trip():
         # save() replaces, order preserved.
         store.save(list(reversed(videos)))
         assert store.load() == list(reversed(videos))
+        # append() adds continuation rows after `start`, no full rewrite.
+        more = [Video("aqz-KE-bpKQ", "Three", "c3", "0:30", "https://t/3.jpg")]
+        store.append(more, start=2)
+        assert store.load() == list(reversed(videos)) + more
     print("feed store round trip: ok")
 
 
