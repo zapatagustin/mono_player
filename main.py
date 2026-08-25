@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "app"))
 
 from auth import AuthManager  # noqa: E402
+from cookiejar import CookieJar  # noqa: E402
 from theme import Theme  # noqa: E402
 from feedmodel import FeedModel  # noqa: E402
 from feedstore import FeedStore  # noqa: E402
@@ -94,7 +95,9 @@ def main() -> int:
     )
     tab_store = TabStore(data_dir / "mono.db")
     client = make_client()
-    auth = AuthManager(tab_store, client=client)
+    # The login session, exported for yt-dlp (mark-watched needs cookies).
+    cookie_jar = CookieJar(data_dir / "cookies.txt")
+    auth = AuthManager(tab_store, client=client, cookie_jar=cookie_jar)
     thumb_cache = ThumbCache(cache_dir / "thumbs")
     feed = FeedModel(
         client, FeedStore(data_dir / "mono.db"), thumb_cache, auth=auth,
@@ -125,12 +128,17 @@ def main() -> int:
     def ensure_login_profile():
         if not auth.showLogin or login_profile[0] is not None:
             return
-        # Off-the-record: the google session cookies never touch disk; only
-        # the exchanged master token survives, in the keyring.
+        # Persistent (storageName puts the store under AppDataLocation/
+        # QtWebEngine): the google session must survive restarts so yt-dlp
+        # keeps marking videos watched. The default cookie policy is
+        # AllowPersistentCookies, so session cookies — the one-shot
+        # oauth_token included — still never reach disk.
         profile = QQuickWebEngineProfile()
-        profile.setOffTheRecord(True)
+        profile.setOffTheRecord(False)
+        profile.setStorageName("login")
         profile.setHttpUserAgent(LOGIN_UA)
         profile.cookieStore().cookieAdded.connect(auth.onCookieAdded)
+        cookie_jar.attach(profile.cookieStore())
         login_profile[0] = profile
         engine.rootContext().setContextProperty("loginProfile", profile)
 
@@ -146,6 +154,13 @@ def main() -> int:
     engine.rootContext().setContextProperty("picker", picker)
     engine.rootContext().setContextProperty("authAvailable", WEBENGINE)
     engine.rootContext().setContextProperty("loginProfile", None)
+    # ytdl-raw-options is comma-separated, so a path holding a comma can't
+    # be passed through it; empty means "no cookies, no mark-watched".
+    cookies_txt = str(cookie_jar.path)
+    engine.rootContext().setContextProperty(
+        "cookieFile",
+        cookies_txt if cookie_jar.path.exists() and "," not in cookies_txt
+        else "")
     engine.load(str(ROOT / "qml" / "Main.qml"))
     if not engine.rootObjects():
         return 1

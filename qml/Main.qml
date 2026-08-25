@@ -662,9 +662,14 @@ Window {
                                 p.setProperty("ytdl-format",
                                     "bv*[vcodec^=av01][height<=?4320]+ba/bv*[vcodec^=vp9]+ba/b")
                                 // Subtitle tracks must be requested or
-                                // ytdl_hook adds none.
+                                // ytdl_hook adds none. With the exported
+                                // login cookies, yt-dlp's mark-watched
+                                // puts playback in the watch history.
                                 p.setProperty("ytdl-raw-options",
-                                    'sub-langs="es.*,en.*",write-subs=')
+                                    'sub-langs="es.*,en.*",write-subs='
+                                    + (cookieFile
+                                       ? ",mark-watched=,cookies=" + cookieFile
+                                       : ""))
                                 // Runtime UI state via async observers only —
                                 // synchronous getProperty during load deadlocks.
                                 p.observe("stream-open-filename")

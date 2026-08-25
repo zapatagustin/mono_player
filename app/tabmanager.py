@@ -515,6 +515,10 @@ class TabManager(QAbstractListModel):
         if self._url_cache is not None:
             cached = self._url_cache.get(video_id, self._now())
             if cached is not None:
+                # ecomono: a cache hit skips ytdl_hook, so yt-dlp's
+                # mark-watched never runs — replays within the URL TTL do
+                # not reach the watch history. Upgrade path: mark watched
+                # from here instead of leaving it to yt-dlp.
                 live.used_cache = True
                 return cached
         return WATCH_URL + video_id

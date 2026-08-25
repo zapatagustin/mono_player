@@ -40,7 +40,7 @@ class AuthManager(QObject):
     accountChanged = Signal(str)  # active Google account email
 
     def __init__(self, store, client=None, keyring_mod=None, exchange_fn=None,
-                 oauth_fn=None, now_fn=None, parent=None):
+                 oauth_fn=None, now_fn=None, cookie_jar=None, parent=None):
         super().__init__(parent)
         if keyring_mod is None:
             import keyring as keyring_mod
@@ -50,6 +50,7 @@ class AuthManager(QObject):
             oauth_fn = oauth_fn or gpsoauth.perform_oauth
         self._store = store
         self._keyring = keyring_mod
+        self._cookie_jar = cookie_jar
         self._exchange_fn = exchange_fn
         self._oauth_fn = oauth_fn
         self._now = now_fn or time.time
@@ -268,6 +269,10 @@ class AuthManager(QObject):
             self._store.meta_set(f"page_id:{email}", None)
             self._store.meta_set(f"channel_name:{email}", None)
         self._bearer = None
+        # The exported cookies are the webview session, not this account's:
+        # signing out invalidates them either way.
+        if self._cookie_jar is not None:
+            self._cookie_jar.clear()
         if self._emails:
             self._activate(self._emails[0])
             return
