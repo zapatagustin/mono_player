@@ -26,6 +26,7 @@ VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB, CHANNEL_ID, META, PLAYLIST_ID = range
 
 class FeedModel(QAbstractListModel):
     contextChanged = Signal()
+    loadingMoreChanged = Signal()
     message = Signal(str)  # user-facing toast, shown in the statusline
 
     def __init__(self, client, store: FeedStore, cache: ThumbCache, auth=None,
@@ -110,7 +111,7 @@ class FeedModel(QAbstractListModel):
         if self._more is not None and not self._loading_more:
             # Flagged here, not in the task: several signals can land before
             # the loop runs the coroutine.
-            self._loading_more = True
+            self._set_loading_more(True)
             asyncio.create_task(self._load_more())
 
     @Slot(str)
@@ -221,6 +222,14 @@ class FeedModel(QAbstractListModel):
     # (watch later, or a playlist opened from gp) — gates removal.
     contextPlaylistId = Property(str, lambda s: s._context_playlist_id,
                                  notify=contextChanged)
+    # Continuation page in flight — drives the grid's footer.
+    loadingMore = Property(bool, lambda s: s._loading_more,
+                           notify=loadingMoreChanged)
+
+    def _set_loading_more(self, value: bool):
+        if self._loading_more != value:
+            self._loading_more = value
+            self.loadingMoreChanged.emit()
 
     @Slot()
     def loadWatchLater(self):
@@ -289,7 +298,7 @@ class FeedModel(QAbstractListModel):
     async def _load_more(self):
         more = self._more
         if more is None:  # cleared between the slot firing and this running
-            self._loading_more = False
+            self._set_loading_more(False)
             return
         token, fetch = more
         try:
@@ -298,7 +307,7 @@ class FeedModel(QAbstractListModel):
             print(f"feed: continuation failed: {exc!r}")
             return
         finally:
-            self._loading_more = False
+            self._set_loading_more(False)
         # Stale-continuation guard (same idea as _remove_from_playlist):
         # another feed may have loaded during the await -- these rows and
         # this token belong to the old feed, not the one on screen.

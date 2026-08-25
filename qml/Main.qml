@@ -391,6 +391,20 @@ Window {
                             feed.loadMore()
                     }
 
+                    // Continuation page in flight: plain-text footer, same
+                    // register as the panel headers (no spinner in a TUI).
+                    footer: Item {
+                        width: grid.width
+                        height: feed.loadingMore ? th.barHeight : 0
+                        visible: feed.loadingMore
+                        Text {
+                            anchors.centerIn: parent
+                            text: "loading more…"
+                            color: th.fgDim
+                            font.pixelSize: th.fontSizeSmall
+                        }
+                    }
+
                     delegate: Item {
                         id: cell
                         required property int index

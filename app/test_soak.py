@@ -139,6 +139,70 @@ def test_position_checks_track_the_mark():
     assert started(s2) and s2.marks["pos"] == 0.0
 
 
+def test_paginates_drives_growth_dedup_and_token_advance():
+    """_paginates passes after N grown pages (or clean exhaustion), keeps
+    polling while a page is in flight, and refuses duplicate ids or a stuck
+    token -- offline: the feed is faked, no tasks, no network."""
+    from types import SimpleNamespace
+
+    def vid(i, duration=""):
+        return SimpleNamespace(video_id=f"v{i:010d}", duration=duration)
+
+    class FakeFeed:
+        def __init__(self):
+            self.loadingMore = False
+            self._more = ("TOK1", None)
+            self._videos = [vid(1), vid(2)]
+            self.requested = 0
+
+        def loadMore(self):
+            self.requested += 1
+            self.loadingMore = True
+
+    class FakeSoak:
+        def __init__(self):
+            self.feed = FakeFeed()
+            self.lines = []
+
+        def log(self, msg):
+            self.lines.append(msg)
+
+    s = FakeSoak()
+    check = soak._paginates(2)
+    assert not check(s)                     # baseline + page 1 requested
+    assert s.feed.requested == 1 and s.feed.loadingMore
+    assert not check(s)                     # in flight: just polls
+    s.feed._videos += [vid(3, "SHORT")]     # page 1 lands, token advances
+    s.feed._more, s.feed.loadingMore = ("TOK2", None), False
+    assert not check(s)                     # 1 page done, page 2 requested
+    assert s.feed.requested == 2
+    s.feed._videos += [vid(4)]              # page 2 lands, feed exhausted
+    s.feed._more, s.feed.loadingMore = None, False
+    assert check(s)                         # target reached: pass
+    assert any("2 pages" in l and "1 shorts" in l for l in s.lines)
+
+    # Clean exhaustion before the target also passes (a short live feed).
+    s2 = FakeSoak()
+    s2.feed._more = None
+    assert soak._paginates(2)(s2)
+    assert any("pages exhausted" in l for l in s2.lines)
+
+    # Duplicate ids never pass, and say why.
+    s3 = FakeSoak()
+    s3.feed._videos = [vid(1), vid(1)]
+    assert not soak._paginates(1)(s3)
+    assert any("duplicate" in l for l in s3.lines)
+
+    # A grown page whose token did not advance never passes.
+    s4 = FakeSoak()
+    check4 = soak._paginates(2)
+    assert not check4(s4)                   # baseline, page requested
+    s4.feed._videos += [vid(9)]
+    s4.feed.loadingMore = False             # page landed, token unchanged
+    assert not check4(s4)
+    assert any("did not advance" in l for l in s4.lines)
+
+
 def test_degraded_environment_skips_instead_of_failing():
     """No account / empty feed / no player must SKIP the steps that depend on
     them -- the walk still presses the keys, so navigation and quit are
@@ -244,6 +308,7 @@ if __name__ == "__main__":
     test_verdict_skips_do_not_fail_the_run()
     test_summary_reports_counts_net_and_fatals()
     test_position_checks_track_the_mark()
+    test_paginates_drives_growth_dedup_and_token_advance()
     test_degraded_environment_skips_instead_of_failing()
     test_walk_sequences_steps_and_records_every_outcome()
     test_watchdog_fails_a_hung_step()

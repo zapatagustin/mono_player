@@ -437,6 +437,46 @@ def test_feedmodel_stale_continuation():
     print("feedmodel stale continuation: ok")
 
 
+def test_feedmodel_loading_more_property():
+    # loadingMore mirrors the in-flight guard for the QML footer: true when
+    # the slot schedules a page, false again on success, on error and on a
+    # continuation cleared before the task ran -- every exit path emits.
+    store = FakeFeedStore()
+    model = FeedModel(client=None, store=store, cache=None)
+    seen = []
+    model.loadingMoreChanged.connect(lambda: seen.append(model.loadingMore))
+
+    async def fetch_ok(token):
+        return [Video("bbbbbbbbbbb", "Two", "c", "", "")], ""
+
+    async def fetch_boom(token):
+        raise RuntimeError("net down")
+
+    async def drive(fetch, clear=False):
+        model._set_videos([Video("aaaaaaaaaaa", "One", "c", "", "")])
+        model._set_more("TOK", fetch)
+        model.loadMore()
+        assert model.loadingMore is True  # flagged in the slot, pre-await
+        if clear:
+            model._set_videos([])  # a feed switch lands before the task runs
+        while model.loadingMore:
+            await asyncio.sleep(0)
+
+    asyncio.run(drive(fetch_ok))
+    assert seen == [True, False]
+
+    seen.clear()
+    asyncio.run(drive(fetch_boom))  # error path: finally still clears it
+    assert seen == [True, False]
+    assert model._more[0] == "TOK"  # token kept for a retry
+
+    seen.clear()
+    asyncio.run(drive(fetch_ok, clear=True))  # cleared before the task ran
+    assert seen == [True, False]
+    assert model._more is None
+    print("feedmodel loadingMore property: ok")
+
+
 def test_next_parser():
     def compact(vid, title, channel_id=""):
         r = {
@@ -678,6 +718,7 @@ if __name__ == "__main__":
     test_feedmodel_search_pagination()
     test_feedmodel_feed_pagination()
     test_feedmodel_stale_continuation()
+    test_feedmodel_loading_more_property()
     test_next_parser()
     test_playlists_list_parser()
     test_playlist_options_parser()

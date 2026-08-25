@@ -23,7 +23,7 @@ from PySide6.QtCore import QEvent, Qt, QtMsgType, qInstallMessageHandler
 from PySide6.QtGui import QGuiApplication, QKeyEvent
 from PySide6.QtQml import QQmlExpression, qmlContext
 
-WATCHDOG_SECS = 180.0  # > the sum of every step budget below, with slack
+WATCHDOG_SECS = 240.0  # > the sum of every step budget below, with slack
 POLL_SECS = 0.25
 
 # nativeScanCode = evdev keycode + 8 (the historic X offset, preserved by Qt
@@ -155,6 +155,47 @@ def _pos_changed(delta: float):
     return check
 
 
+def _token(feed):
+    return feed._more[0] if feed._more is not None else None
+
+
+def _paginates(pages: int):
+    """Live pagination: drive feed.loadMore() the way the grid's
+    onContentYChanged does, and pass once `pages` continuation pages grew
+    the model -- or the feed ran out of pages cleanly. Duplicate ids or a
+    token that stops advancing log their reason and never pass (the step
+    times out to FAIL). Shorts are counted and logged, never asserted: the
+    live feed may serve none. Turns the browse{continuation}-with-Bearer
+    and shorts-renderer shapes, assumed from spec, into a repeatable check."""
+    state: dict = {}
+
+    def check(s) -> bool:
+        ids = [v.video_id for v in s.feed._videos]
+        if len(set(ids)) != len(ids):
+            s.log("pagination: duplicate video ids in the model")
+            return False
+        if "rows" not in state:  # first poll: baseline before any page
+            state.update(rows=len(ids), done=0, token=_token(s.feed))
+        if s.feed.loadingMore:
+            return False  # page in flight: poll again
+        token = _token(s.feed)
+        if len(ids) > state["rows"]:  # a page landed and grew the model
+            if token is not None and token == state["token"]:
+                s.log("pagination: continuation token did not advance")
+                return False
+            state.update(rows=len(ids), done=state["done"] + 1, token=token)
+        if state["done"] >= pages or token is None:
+            shorts = sum(v.duration == "SHORT" for v in s.feed._videos)
+            s.log(f"pagination: {state['done']} pages, {len(ids)} rows,"
+                  f" {shorts} shorts"
+                  + ("" if token is not None else ", pages exhausted"))
+            state.clear()
+            return True
+        s.feed.loadMore()
+        return False
+    return check
+
+
 QUIT_STEP = "quit (q)"
 
 # ecomono: hardcoded walk. Ceiling: one scripted path, no randomization and
@@ -162,10 +203,14 @@ QUIT_STEP = "quit (q)"
 STEPS = (
     Step("home feed (gh)", ("g", "h"), delay=1.0, timeout=10.0,
          check=_rows, network=True, auth=True),
+    Step("home paginates (2 pages)", (), delay=0.5, timeout=20.0,
+         check=_paginates(2), network=True, auth=True, content=True),
     Step("grid nav (j j k l h)", ("j", "j", "k", "l", "h"), delay=0.5,
          check=_mode("BROWSE")),
     Step("subscriptions (gs)", ("g", "s"), delay=1.0, timeout=10.0,
          check=_rows, network=True, auth=True),
+    Step("subs paginate (2 pages)", (), delay=0.5, timeout=20.0,
+         check=_paginates(2), network=True, auth=True, content=True),
     Step("history (gy)", ("g", "y"), delay=1.0, timeout=10.0,
          check=_rows, network=True, auth=True),
     Step("playlists (gp)", ("g", "p"), delay=1.0, timeout=10.0,
