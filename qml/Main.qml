@@ -1227,6 +1227,8 @@ Window {
                             break
                         }
                         ap.cmd(["seek", 5]); break
+                    case Qt.Key_D:
+                        feed.unlikeVideo(root.currentVideoId); break
                     case Qt.Key_Right:
                         ap.cmd(["seek", 5]); break
                     case Qt.Key_K: case Qt.Key_Up:

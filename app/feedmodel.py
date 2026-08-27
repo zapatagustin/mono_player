@@ -156,19 +156,25 @@ class FeedModel(QAbstractListModel):
     @Slot(str)
     def likeVideo(self, video_id: str):
         if video_id and self._auth is not None:
-            asyncio.create_task(self._like(video_id))
+            asyncio.create_task(self._rate(innertube.like, "liked", video_id))
 
-    async def _like(self, video_id: str):
+    @Slot(str)
+    def unlikeVideo(self, video_id: str):
+        if video_id and self._auth is not None:
+            asyncio.create_task(
+                self._rate(innertube.unlike, "unliked", video_id))
+
+    async def _rate(self, verb, done: str, video_id: str):
         bearer = await self._auth.bearer()
         if bearer is None:
             self.message.emit("login required (gl)")
             return
         try:
-            await innertube.like(self._client, bearer, video_id)
-            self.message.emit("liked")
+            await verb(self._client, bearer, video_id)
+            self.message.emit(done)
         except Exception as exc:
-            print(f"feed: like failed: {exc!r}")
-            self.message.emit("like failed")
+            print(f"feed: {verb.__name__} failed: {exc!r}")
+            self.message.emit(f"{verb.__name__} failed")
 
     @Slot(str, str)
     def commentVideo(self, video_id: str, text: str):

@@ -904,6 +904,7 @@ class PlaylistOption:
 ADD_TO_PLAYLIST_URL = \
     "https://www.youtube.com/youtubei/v1/playlist/get_add_to_playlist"
 LIKE_URL = "https://www.youtube.com/youtubei/v1/like/like"
+REMOVELIKE_URL = "https://www.youtube.com/youtubei/v1/like/removelike"
 
 
 def parse_playlist_options(data) -> list[PlaylistOption]:
@@ -963,8 +964,16 @@ async def remove_from_playlist(client, bearer: str, video_id: str,
 
 
 async def like(client, bearer: str, video_id: str) -> bool:
+    return await _rate(client, bearer, video_id, LIKE_URL)
+
+
+async def unlike(client, bearer: str, video_id: str) -> bool:
+    return await _rate(client, bearer, video_id, REMOVELIKE_URL)
+
+
+async def _rate(client, bearer: str, video_id: str, url: str) -> bool:
     resp = await client.post(
-        LIKE_URL,
+        url,
         json={"context": _account_context(), "target": {"videoId": video_id}},
         headers=_account_headers(bearer),
     )

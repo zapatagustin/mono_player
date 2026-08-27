@@ -149,6 +149,7 @@ Rectangle {
                         Bind { k: "b"; d: "save-to-playlist panel" }
                         Bind { k: "u"; d: "queue panel" }
                         Bind { k: "L"; d: "like the video" }
+                        Bind { k: "d"; d: "unlike the video" }
                         Bind { k: "C"; d: "write a comment" }
                         Bind { k: "S"; d: "subscribe to the channel" }
                         Bind { k: "gc"; d: "open the channel's feed" }
