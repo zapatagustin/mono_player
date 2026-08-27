@@ -344,6 +344,28 @@ def test_resolved_url_cache():
     print("resolved url cache: ok")
 
 
+def test_cache_hit_marks_watched():
+    # A cache hit skips ytdl_hook, so the manager itself must replay the
+    # watch-history ping; fresh loads leave it to yt-dlp.
+    with tempfile.TemporaryDirectory() as tmp:
+        store = make_store(tmp)
+        cache = StreamUrlCache()
+        marked = []
+        m = make_manager(store, url_cache=cache, live_cap=1,
+                         mark_watched=marked.append)
+
+        m.playVideo("aaaaaaaaaaa", "A")
+        t1 = store.load()[0][0].id
+        assert marked == []  # fresh load: ytdl_hook handles it
+        m.resolvedUrl(t1, "https://rr1.googlevideo.com/videoplayback?x=1")
+        m.openInNewTab("bbbbbbbbbbb", "B")
+        m.activate(1)  # cap 1: t1 frozen
+
+        m.activate(0)  # re-materializes from cache
+        assert marked == ["aaaaaaaaaaa"]
+    print("cache hit marks watched: ok")
+
+
 def test_fresh_load_retry():
     # A FRESH (non-cached) load that errors — transient 403s on freshly
     # extracted URLs happen — retries the materialization once, then stops.
@@ -574,6 +596,7 @@ if __name__ == "__main__":
     test_per_tab_state()
     test_enqueue_playnext()
     test_resolved_url_cache()
+    test_cache_hit_marks_watched()
     test_fresh_load_retry()
     test_queue_ops()
     test_autoplay()

@@ -76,6 +76,8 @@ def test_domain_filter():
 def test_jar_writes_file():
     with tempfile.TemporaryDirectory() as tmp:
         jar = CookieJar(Path(tmp) / "sub" / "cookies.txt")
+        changes = []
+        jar.on_change = lambda: changes.append(jar.path.exists())
         jar.onCookieAdded(FakeCookie(".youtube.com", "/", "SID", "one",
                                      secure=True, expiry=1893456000))
         jar.onCookieAdded(FakeCookie(".doubleclick.net", "/", "id", "no"))
@@ -96,6 +98,8 @@ def test_jar_writes_file():
 
         jar.clear()
         assert not jar.path.exists()
+        # on_change fired on every write plus the clear, file gone last.
+        assert changes == [True, True, True, False]
     print("jar file: ok")
 
 

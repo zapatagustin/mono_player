@@ -55,6 +55,9 @@ class CookieJar:
         self.path = Path(path)
         self._cookies: dict[tuple[str, str, str], tuple] = {}
         self._store = None
+        # Fired after the file is (re)written or removed, so callers can
+        # track its existence (the QML cookieFile flag).
+        self.on_change = None
 
     def attach(self, store):
         """loadAllCookies replays whatever the persistent profile already
@@ -84,6 +87,8 @@ class CookieJar:
         tmp.write_text(netscape(sorted(self._cookies.values())))
         os.chmod(tmp, 0o600)
         tmp.replace(self.path)
+        if self.on_change is not None:
+            self.on_change()
 
     def clear(self) -> None:
         """Logout: drop the export and the profile's stored session."""
@@ -91,3 +96,5 @@ class CookieJar:
             self._store.deleteAllCookies()
         self._cookies.clear()
         self.path.unlink(missing_ok=True)
+        if self.on_change is not None:
+            self.on_change()

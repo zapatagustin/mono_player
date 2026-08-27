@@ -134,11 +134,14 @@ class TabManager(QAbstractListModel):
     def __init__(self, store: TabStore, materialize_delay_ms: int = 50,
                  url_cache=None, now_fn=time.time, live_cap: int = LIVE_CAP,
                  freeze_ttl_secs: float = FREEZE_TTL_SECS,
-                 related_provider=None, parent=None):
+                 related_provider=None, mark_watched=None, parent=None):
         super().__init__(parent)
         self._store = store
         self._materialize_delay_ms = materialize_delay_ms
         self._url_cache = url_cache
+        # `mark_watched(video_id)` replays the watch-history ping for loads
+        # that skip ytdl_hook (URL-cache hits); None = feature off.
+        self._mark_watched = mark_watched
         self._now = now_fn
         self._live_cap = max(1, live_cap)
         self._freeze_ttl = freeze_ttl_secs
@@ -515,11 +518,11 @@ class TabManager(QAbstractListModel):
         if self._url_cache is not None:
             cached = self._url_cache.get(video_id, self._now())
             if cached is not None:
-                # ecomono: a cache hit skips ytdl_hook, so yt-dlp's
-                # mark-watched never runs — replays within the URL TTL do
-                # not reach the watch history. Upgrade path: mark watched
-                # from here instead of leaving it to yt-dlp.
+                # A cache hit skips ytdl_hook, so yt-dlp's mark-watched
+                # never runs for this load — replay the ping ourselves.
                 live.used_cache = True
+                if self._mark_watched is not None:
+                    self._mark_watched(video_id)
                 return cached
         return WATCH_URL + video_id
 

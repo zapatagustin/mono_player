@@ -34,7 +34,7 @@ from net import make_client  # noqa: E402
 from picker import PlaylistPicker  # noqa: E402
 from comments import CommentsModel  # noqa: E402
 from related import RelatedModel  # noqa: E402
-from tabmanager import TabManager  # noqa: E402
+from tabmanager import WATCH_URL, TabManager  # noqa: E402
 from tabstore import TabStore  # noqa: E402
 from thumbs import ThumbCache  # noqa: E402
 from urlcache import StreamUrlCache  # noqa: E402
@@ -105,8 +105,21 @@ def main() -> int:
     related = RelatedModel(client, thumb_cache=thumb_cache)
     # related_for reads RelatedModel's cache (never fetches) so autoplay on
     # queue exhaustion can enqueue instantly (GUIDELINE.org, Tabs).
+    def mark_watched(video_id: str):
+        # URL-cache hits skip mpv's ytdl_hook, so replay the watch-history
+        # ping with the same machinery the hook uses (--mark-watched works
+        # under --simulate). Fire-and-forget; failures only cost the mark.
+        if not cookie_jar.path.exists():
+            return
+        subprocess.Popen(
+            ["yt-dlp", "--quiet", "--no-warnings", "--simulate",
+             "--mark-watched", "--cookies", str(cookie_jar.path),
+             WATCH_URL + video_id],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     tabs = TabManager(tab_store, url_cache=StreamUrlCache(),
-                      related_provider=related.related_for)
+                      related_provider=related.related_for,
+                      mark_watched=mark_watched)
     comments = CommentsModel(client, auth=auth)
     picker = PlaylistPicker(client, auth)
     # Prefetch related whenever the active video changes — the panel and
@@ -156,11 +169,18 @@ def main() -> int:
     engine.rootContext().setContextProperty("loginProfile", None)
     # ytdl-raw-options is comma-separated, so a path holding a comma can't
     # be passed through it; empty means "no cookies, no mark-watched".
+    # Re-synced on every jar write/clear: the first-ever login session
+    # creates the file after boot, and logout removes it.
     cookies_txt = str(cookie_jar.path)
-    engine.rootContext().setContextProperty(
-        "cookieFile",
-        cookies_txt if cookie_jar.path.exists() and "," not in cookies_txt
-        else "")
+
+    def sync_cookie_file():
+        engine.rootContext().setContextProperty(
+            "cookieFile",
+            cookies_txt if cookie_jar.path.exists() and "," not in cookies_txt
+            else "")
+
+    cookie_jar.on_change = sync_cookie_file
+    sync_cookie_file()
     engine.load(str(ROOT / "qml" / "Main.qml"))
     if not engine.rootObjects():
         return 1
