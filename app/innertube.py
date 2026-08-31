@@ -9,7 +9,9 @@ SEARCH_URL = "https://www.youtube.com/youtubei/v1/search"
 # Stale clientVersions get 400 FAILED_PRECONDITION — bump here when that
 # appears (GUIDELINE.org).
 WEB_CLIENT_VERSION = "2.20260101.00.00"
-ANDROID_CLIENT_VERSION = "20.10.38"
+# 20.30+ includes shorts shelves in FEwhat_to_watch (older versions strip
+# shorts from every account feed).
+ANDROID_CLIENT_VERSION = "20.30.36"
 
 CLIENT_CONTEXT = {
     "client": {
@@ -417,11 +419,16 @@ def _parse_compact_video(vr) -> Video | None:
     thumb = _walk(vr, "thumbnail", "thumbnails", -1, "url")
     meta_parts = [t for t in (_text(vr.get("shortViewCountText")),
                               _text(vr.get("publishedTimeText"))) if t]
+    # ANDROID home serves shorts as gridVideoRenderers whose navigation is a
+    # reelWatchEndpoint; the sentinel drives the grid's portrait tile.
+    duration = "SHORT" if isinstance(
+        _walk(vr, "navigationEndpoint", "reelWatchEndpoint"), dict) \
+        else _text(vr.get("lengthText")) or ""
     return Video(
         vid,
         title,
         _text(vr.get("shortBylineText")) or "",
-        _text(vr.get("lengthText")) or "",
+        duration,
         thumb if isinstance(thumb, str) else "",
         _channel_id(vr.get("shortBylineText")),
         " · ".join(meta_parts),

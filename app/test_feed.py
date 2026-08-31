@@ -609,6 +609,15 @@ def test_next_parser():
               "UChome", "1M views · 2 days ago"),
     ]
 
+    # A gridVideoRenderer navigating to a reelWatchEndpoint is a short --
+    # the sentinel replaces the clock duration.
+    short_item = {"gridVideoRenderer": {
+        **grid_item["gridVideoRenderer"],
+        "navigationEndpoint": {"reelWatchEndpoint": {"videoId": "dQw4w9WgXcQ"}},
+    }}
+    _, _, videos = parse_next({"contents": [short_item]})
+    assert videos[0].duration == "SHORT"
+
     # Owner id can live on the title runs instead of a top-level endpoint.
     data4 = {"x": {"videoOwnerRenderer": {
         "title": {"runs": [{"text": "RunsOwner", "navigationEndpoint": {
