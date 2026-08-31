@@ -459,8 +459,14 @@ Window {
                                     width: parent.width
                                     height: 180
                                     color: th.bg1
+                                    // Shorts render phone-shaped (9:16),
+                                    // letterboxed on th.bg1; videos fill 16:9.
                                     Image {
-                                        anchors.fill: parent
+                                        anchors.centerIn: parent
+                                        width: cell.duration === "SHORT"
+                                            ? Math.round(parent.height * 9 / 16)
+                                            : parent.width
+                                        height: parent.height
                                         asynchronous: true
                                         sourceSize.width: 320
                                         fillMode: Image.PreserveAspectCrop
