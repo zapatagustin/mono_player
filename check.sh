@@ -73,4 +73,20 @@ else
   warn "pinned-nightly-date marker missing from flake.nix"
 fi
 
+# Same failure mode for the InnerTube WEB clientVersion: stale values 400
+# with FAILED_PRECONDITION far from the cause. The date is embedded in the
+# version string itself ("2.YYYYMMDD.00.00") -- offline age check only.
+web_date=$(grep -oP 'WEB_CLIENT_VERSION = "2\.\K[0-9]{8}' \
+  "$(dirname "$0")/app/innertube.py" || true)
+if [ -n "$web_date" ]; then
+  age_days=$(( ($(date +%s) - $(date -d "$web_date" +%s)) / 86400 ))
+  if [ "$age_days" -le 180 ]; then
+    ok "InnerTube WEB clientVersion ${age_days}d old"
+  else
+    warn "InnerTube WEB clientVersion ${age_days}d old -- if browse/search 400, bump WEB_CLIENT_VERSION in app/innertube.py"
+  fi
+else
+  warn "WEB_CLIENT_VERSION marker missing from app/innertube.py"
+fi
+
 exit "$fail"

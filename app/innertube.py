@@ -248,6 +248,8 @@ def _parse_video_renderer(vr) -> Video | None:
     if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) or title is None:
         return None
     thumb = _walk(vr, "thumbnail", "thumbnails", -1, "url")
+    meta_parts = [t for t in (_text(vr.get("shortViewCountText")),
+                              _text(vr.get("publishedTimeText"))) if t]
     return Video(
         vid,
         title,
@@ -255,6 +257,7 @@ def _parse_video_renderer(vr) -> Video | None:
         _text(vr.get("lengthText")) or "",
         thumb if isinstance(thumb, str) else "",
         _channel_id(vr.get("shortBylineText")),
+        " · ".join(meta_parts),
     )
 
 
@@ -390,13 +393,18 @@ def _parse_lockup(vm) -> Video | None:
             break
     thumb = _walk(vm, "contentImage", "thumbnailViewModel", "image",
                   "sources", -1, "url")
+    # The only browseId in the lockup lives under the channel avatar.
+    channel_id = _walk(vm, "metadata", "lockupMetadataViewModel", "image",
+                       "decoratedAvatarViewModel", "rendererContext",
+                       "commandContext", "onTap", "innertubeCommand",
+                       "browseEndpoint", "browseId")
     return Video(
         vid,
         title,
         channel if isinstance(channel, str) else "",
         duration,
         thumb if isinstance(thumb, str) else "",
-        "",
+        channel_id if isinstance(channel_id, str) else "",
         " · ".join(meta_parts),
     )
 

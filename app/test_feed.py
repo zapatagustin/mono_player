@@ -555,6 +555,9 @@ def test_next_parser():
             "contentType": ctype,
             "metadata": {"lockupMetadataViewModel": {
                 "title": {"content": title},
+                "image": {"decoratedAvatarViewModel": {"rendererContext": {
+                    "commandContext": {"onTap": {"innertubeCommand": {
+                        "browseEndpoint": {"browseId": "UClock"}}}}}}},
                 "metadata": {"contentMetadataViewModel": {"metadataRows": [
                     {"metadataParts": [{"text": {"content": "LockChan"}}]},
                     {"metadataParts": [
@@ -578,7 +581,7 @@ def test_next_parser():
     _, _, related = parse_next(data3)
     assert related == [
         Video("dQw4w9WgXcQ", "Lock One", "LockChan", "31:25", "https://t/l.jpg",
-              "", "1.2M views · 3 days ago"),
+              "UClock", "1.2M views · 3 days ago"),
     ]
 
     # compactVideoRenderer carries views/date as separate text fields.
@@ -712,6 +715,14 @@ def test_playlist_parser():
         Video("aaaaaaaaaaa", "First", "chan", "2:34", "https://t/p.jpg"),
         Video("bbbbbbbbbbb", "Second", "chan", "2:34", "https://t/p.jpg"),
     ]
+
+    # Views/date land in meta when the payload carries them.
+    item = pvr("aaaaaaaaaaa", "First")
+    item["playlistVideoRenderer"]["shortViewCountText"] = {
+        "simpleText": "9K views"}
+    item["playlistVideoRenderer"]["publishedTimeText"] = {
+        "simpleText": "2 months ago"}
+    assert parse_playlist({"a": [item]})[0].meta == "9K views · 2 months ago"
 
     # ANDROID may serve videoWithContextRenderer instead; both are accepted.
     mixed = {"a": [pvr("aaaaaaaaaaa", "P"), {
