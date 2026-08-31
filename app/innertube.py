@@ -482,23 +482,32 @@ async def related(client, video_id: str) -> tuple[str, str, list[Video]]:
     return owner_id, owner_name, [v for v in videos if v.video_id != video_id]
 
 
-# Stable protobuf param selecting a channel's Videos tab.
+# Stable protobuf params selecting a channel's Videos / Shorts tab.
 CHANNEL_VIDEOS_PARAMS = "EgZ2aWRlb3PyBgQKAjoA"
+CHANNEL_SHORTS_PARAMS = "8gYFCgOaAQA="
 
 
-async def channel_videos(client, browse_id: str) -> tuple[list[Video], str]:
+async def channel_videos(client, browse_id: str,
+                         params: str = CHANNEL_VIDEOS_PARAMS,
+                         ) -> tuple[list[Video], str]:
     """Anonymous channel browse (Videos tab; the defensive walker still
     finds videos if the params stop selecting the tab)."""
     resp = await client.post(
         BROWSE_URL,
         json={"context": WEB_CONTEXT, "browseId": browse_id,
-              "params": CHANNEL_VIDEOS_PARAMS},
+              "params": params},
         headers={"content-type": "application/json"},
     )
     resp.raise_for_status()
     data = resp.json()
     _, _, videos = parse_next(data)
     return videos, parse_continuation_token(data)
+
+
+async def channel_shorts(client, browse_id: str) -> list[Video]:
+    """A channel's most recent shorts, newest first (anonymous WEB browse)."""
+    videos, _ = await channel_videos(client, browse_id, CHANNEL_SHORTS_PARAMS)
+    return [v for v in videos if v.duration == "SHORT"]
 
 
 # ANDROID now serves per-channel shelves of compactVideoRenderer (same field

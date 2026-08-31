@@ -753,6 +753,57 @@ def test_playlist_parser():
     print("playlist parser: ok")
 
 
+def test_feedmodel_home_shorts():
+    # Home splices a shorts block at row 4: up to 2 per channel from the
+    # first 4 distinct recommended channels, deduped against the feed.
+    real_feed = innertube.account_feed
+    real_shorts = innertube.channel_shorts
+    try:
+        async def fake_feed(client, bearer, browse_id):
+            return [
+                Video("aaaaaaaaaaa", "V1", "c", "1:00", "", "UC1"),
+                Video("bbbbbbbbbbb", "V2", "c", "1:00", "", "UC2"),
+                Video("ccccccccccc", "V3", "c", "1:00", "", "UC1"),
+                Video("ddddddddddd", "V4", "c", "1:00", "", ""),
+                Video("eeeeeeeeeee", "V5", "c", "1:00", "", "UC3"),
+                Video("fffffffffff", "V6", "c", "1:00", "", "UC4"),
+                Video("ggggggggggg", "V7", "c", "1:00", "", "UC5"),
+            ], ""
+
+        calls = []
+
+        async def fake_shorts(client, cid):
+            calls.append(cid)
+            if cid == "UC1":
+                return [Video("hhhhhhhhhhh", "S1", "", "SHORT", ""),
+                        Video("iiiiiiiiiii", "S2", "", "SHORT", ""),
+                        Video("jjjjjjjjjjj", "S3", "", "SHORT", "")]
+            if cid == "UC2":
+                # Duplicate of a UC1 short and of a feed video: both dropped.
+                return [Video("hhhhhhhhhhh", "S1", "", "SHORT", ""),
+                        Video("aaaaaaaaaaa", "V1", "", "SHORT", "")]
+            if cid == "UC3":
+                raise RuntimeError("net down")  # one channel failing is fine
+            return []
+
+        innertube.account_feed = fake_feed
+        innertube.channel_shorts = fake_shorts
+        model = FeedModel(client=None, store=FakeFeedStore(), cache=None,
+                          auth=FakeAuth())
+        asyncio.run(model._load_home())
+        # Distinct channels, empty ids skipped, capped at 4 (UC5 not fetched).
+        assert calls == ["UC1", "UC2", "UC3", "UC4"], calls
+        assert [v.video_id for v in model._videos] == [
+            "aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd",
+            "hhhhhhhhhhh", "iiiiiiiiiii",  # 2-per-channel cap drops S3
+            "eeeeeeeeeee", "fffffffffff", "ggggggggggg",
+        ], [v.video_id for v in model._videos]
+    finally:
+        innertube.account_feed = real_feed
+        innertube.channel_shorts = real_shorts
+    print("feedmodel home shorts: ok")
+
+
 def test_thumb_fallback():
     # Parsed thumb URL fails -> hqdefault fallback is fetched and cached.
     class FakeResp:
@@ -802,6 +853,7 @@ if __name__ == "__main__":
     test_feedmodel_feed_pagination()
     test_feedmodel_stale_continuation()
     test_feedmodel_loading_more_property()
+    test_feedmodel_home_shorts()
     test_thumb_fallback()
     test_next_parser()
     test_playlists_list_parser()

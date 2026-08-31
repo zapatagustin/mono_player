@@ -252,9 +252,48 @@ class FeedModel(QAbstractListModel):
     @Slot()
     def loadHome(self):
         if self._auth is not None:
-            asyncio.create_task(self._load_account_feed(
-                lambda c, b: innertube.account_feed(c, b, "FEwhat_to_watch"),
-                "home", more=innertube.browse_continuation))
+            asyncio.create_task(self._load_home())
+
+    async def _load_home(self):
+        await self._load_account_feed(
+            lambda c, b: innertube.account_feed(c, b, "FEwhat_to_watch"),
+            "home", more=innertube.browse_continuation)
+        await self._load_home_shorts()
+
+    async def _load_home_shorts(self):
+        """YouTube strips shorts from the ANDROID home feed on most requests;
+        splice in recent shorts from the channels home already recommends.
+        ecomono: fixed 4 channels x 2 shorts in one block at row 4 -- no
+        tuning knobs (upgrade: size/position from config if it grates)."""
+        channel_ids = list(dict.fromkeys(
+            v.channel_id for v in self._videos if v.channel_id))[:4]
+        if not channel_ids:
+            return
+        results = await asyncio.gather(
+            *(innertube.channel_shorts(self._client, cid)
+              for cid in channel_ids),
+            return_exceptions=True)
+        # Stale-context guard: the user may have navigated away meanwhile.
+        if self._context_label != "home":
+            return
+        seen = {v.video_id for v in self._videos}
+        shorts = []
+        for res in results:
+            if isinstance(res, BaseException):
+                print(f"feed: home shorts failed: {res!r}")
+                continue
+            for v in res[:2]:
+                if v.video_id not in seen:
+                    seen.add(v.video_id)
+                    shorts.append(v)
+        if not shorts:
+            return
+        row = min(4, len(self._videos))
+        self.beginInsertRows(QModelIndex(), row, row + len(shorts) - 1)
+        self._videos[row:row] = shorts
+        self.endInsertRows()
+        self._store.save(self._videos)
+        print(f"feed: {len(shorts)} home shorts spliced")
 
     @Slot()
     def loadHistory(self):
