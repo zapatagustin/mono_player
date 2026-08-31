@@ -96,6 +96,16 @@ def test_parser():
         "browseEndpoint": {"browseId": "UCabc123"}
     }
     assert parse_search(search_response([item]))[0].channel_id == "UCabc123"
+
+    # Views/date land in meta alongside duration; either alone also works.
+    item = video_renderer("dQw4w9WgXcQ", "One")
+    item["videoRenderer"]["shortViewCountText"] = {"simpleText": "1.2M views"}
+    item["videoRenderer"]["publishedTimeText"] = {"simpleText": "3 days ago"}
+    parsed = parse_search(search_response([item]))[0]
+    assert parsed.meta == "1.2M views · 3 days ago"
+    assert parsed.duration == "1:23"
+    del item["videoRenderer"]["shortViewCountText"]
+    assert parse_search(search_response([item]))[0].meta == "3 days ago"
     print("parser: ok")
 
 
@@ -246,8 +256,11 @@ def test_shorts_parser():
             "videoId": "aqz-KE-bpKQ"}}},
         "overlayMetadata": {"primaryText": {"content": "Lock Short"},
                             "secondaryText": {"content": "1.2M views"}},
-        "thumbnail": {"sources": [{"url": "https://t/s1.jpg"},
-                                  {"url": "https://t/s2.jpg"}]},
+        # 2025+ shape: image under a doubled thumbnailViewModel key,
+        # sources ordered largest-first.
+        "thumbnailViewModel": {"thumbnailViewModel": {"image": {
+            "sources": [{"url": "https://t/s1.jpg"},
+                        {"url": "https://t/s2.jpg"}]}}},
     }}
 
     # Both shapes land in the feed in document order, shelf or not, marked
@@ -256,9 +269,18 @@ def test_shorts_parser():
         reel, {"reelShelfRenderer": {"items": [lockup]}}]})
     assert videos == [
         Video("dQw4w9WgXcQ", "Reel One", "", "SHORT", "https://t/reel.jpg"),
-        Video("aqz-KE-bpKQ", "Lock Short", "", "SHORT", "https://t/s2.jpg",
+        Video("aqz-KE-bpKQ", "Lock Short", "", "SHORT", "https://t/s1.jpg",
               "", "1.2M views"),
     ], videos
+
+    # Pre-2025 flat `thumbnail.sources` still parses.
+    flat = {"shortsLockupViewModel": {
+        **{k: v for k, v in lockup["shortsLockupViewModel"].items()
+           if k != "thumbnailViewModel"},
+        "thumbnail": {"sources": [{"url": "https://t/f1.jpg"},
+                                  {"url": "https://t/f2.jpg"}]},
+    }}
+    assert parse_next({"a": [flat]})[2][0].thumb_url == "https://t/f2.jpg"
 
     # Same shapes in the subscriptions feed and in search results.
     assert [v.video_id for v in parse_subscriptions({"x": [lockup]})] \
@@ -516,11 +538,14 @@ def test_next_parser():
         {"videoWithContextRenderer": {
             "videoId": "aqz-KE-bpKQ",
             "headline": {"runs": [{"text": "V"}]},
+            "shortViewCountText": {"runs": [{"text": "3M views"}]},
+            "publishedTimeText": {"runs": [{"text": "5 days ago"}]},
         }},
     ]}
     owner_id, owner_name, related = parse_next(data2)
     assert (owner_id, owner_name) == ("", "")
     assert [v.video_id for v in related] == ["aqz-KE-bpKQ"]
+    assert related[0].meta == "3M views · 5 days ago"
 
     # Modern WEB shape: lockupViewModel (title/channel under viewmodels,
     # duration as a thumbnail badge). Non-video lockups are skipped.
@@ -708,6 +733,44 @@ def test_playlist_parser():
     print("playlist parser: ok")
 
 
+def test_thumb_fallback():
+    # Parsed thumb URL fails -> hqdefault fallback is fetched and cached.
+    class FakeResp:
+        content = b"img"
+
+        def __init__(self, ok):
+            self.ok = ok
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise RuntimeError("404")
+
+    class FakeClient:
+        def __init__(self):
+            self.urls = []
+
+        async def get(self, url):
+            self.urls.append(url)
+            return FakeResp("hqdefault" in url)
+
+    class FakeCache:
+        def get(self, vid):
+            return None
+
+        def put(self, vid, content):
+            return f"/cache/{vid}.jpg"
+
+    client = FakeClient()
+    model = FeedModel(client=client, store=FakeFeedStore(), cache=FakeCache())
+    asyncio.run(model._fetch_thumb("dQw4w9WgXcQ", "https://t/expired.jpg"))
+    assert client.urls == [
+        "https://t/expired.jpg",
+        "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+    ], client.urls
+    assert model._thumbs["dQw4w9WgXcQ"].endswith("dQw4w9WgXcQ.jpg")
+    print("thumb fallback: ok")
+
+
 if __name__ == "__main__":
     test_parser()
     test_search_token_parser()
@@ -719,6 +782,7 @@ if __name__ == "__main__":
     test_feedmodel_feed_pagination()
     test_feedmodel_stale_continuation()
     test_feedmodel_loading_more_property()
+    test_thumb_fallback()
     test_next_parser()
     test_playlists_list_parser()
     test_playlist_options_parser()

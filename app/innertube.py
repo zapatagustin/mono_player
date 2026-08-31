@@ -66,6 +66,8 @@ def _parse_video(item) -> Video | None:
     channel = _walk(vr, "ownerText", "runs", 0, "text")
     duration = _walk(vr, "lengthText", "simpleText")
     thumb = _walk(vr, "thumbnail", "thumbnails", -1, "url")
+    meta_parts = [t for t in (_text(vr.get("shortViewCountText")),
+                              _text(vr.get("publishedTimeText"))) if t]
     return Video(
         vid,
         title,
@@ -73,6 +75,7 @@ def _parse_video(item) -> Video | None:
         duration if isinstance(duration, str) else "",
         thumb if isinstance(thumb, str) else "",
         _channel_id(vr.get("ownerText")),
+        " · ".join(meta_parts),
     )
 
 
@@ -212,6 +215,8 @@ def _parse_video_with_context(item) -> Video | None:
     if title is None:
         return None
     thumb = _walk(vr, "thumbnail", "thumbnails", -1, "url")
+    meta_parts = [t for t in (_text(vr.get("shortViewCountText")),
+                              _text(vr.get("publishedTimeText"))) if t]
     return Video(
         vid,
         title,
@@ -219,6 +224,7 @@ def _parse_video_with_context(item) -> Video | None:
         _text(vr.get("lengthText")) or "",
         thumb if isinstance(thumb, str) else "",
         _channel_id(vr.get("shortBylineText")),
+        " · ".join(meta_parts),
     )
 
 
@@ -269,7 +275,11 @@ def _parse_short(name, node) -> Video | None:
         vid = _walk(node, "onTap", "innertubeCommand", "reelWatchEndpoint",
                     "videoId")
         title = _walk(node, "overlayMetadata", "primaryText", "content")
-        thumb = _walk(node, "thumbnail", "sources", -1, "url")
+        # 2025+ nests the image under a doubled thumbnailViewModel key;
+        # older payloads carried a flat `thumbnail.sources`.
+        thumb = _walk(node, "thumbnailViewModel", "thumbnailViewModel",
+                      "image", "sources", 0, "url") \
+            or _walk(node, "thumbnail", "sources", -1, "url")
         meta = _walk(node, "overlayMetadata", "secondaryText", "content")
     if not isinstance(vid, str) or not _VIDEO_ID.fullmatch(vid) \
             or not isinstance(title, str):

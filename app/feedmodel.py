@@ -24,6 +24,10 @@ VIDEO_ID, TITLE, CHANNEL, DURATION, THUMB, CHANNEL_ID, META, PLAYLIST_ID = range
 )
 
 
+def _fallback_thumb(video_id: str) -> str:
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+
+
 class FeedModel(QAbstractListModel):
     contextChanged = Signal()
     loadingMoreChanged = Signal()
@@ -124,10 +128,11 @@ class FeedModel(QAbstractListModel):
             self._set_thumb(video_id, cached)
             return
         video = next((v for v in self._videos if v.video_id == video_id), None)
-        if video is None or not video.thumb_url:
+        if video is None:
             return
         self._pending.add(video_id)
-        asyncio.create_task(self._fetch_thumb(video_id, video.thumb_url))
+        url = video.thumb_url or _fallback_thumb(video_id)
+        asyncio.create_task(self._fetch_thumb(video_id, url))
 
     @Slot()
     def loadSubscriptions(self):
@@ -420,13 +425,19 @@ class FeedModel(QAbstractListModel):
         self._store.append(new, start)
 
     async def _fetch_thumb(self, video_id: str, url: str):
+        # Parsed URLs can 404 or expire; i.ytimg.com hqdefault always exists.
         try:
-            async with net.THUMB_SEMAPHORE:
-                resp = await self._client.get(url)
-                resp.raise_for_status()
-            self._set_thumb(video_id, self._cache.put(video_id, resp.content))
-        except Exception as exc:
-            print(f"feed: thumb {video_id} failed: {exc!r}")
+            for attempt_url in dict.fromkeys((url, _fallback_thumb(video_id))):
+                try:
+                    async with net.THUMB_SEMAPHORE:
+                        resp = await self._client.get(attempt_url)
+                        resp.raise_for_status()
+                except Exception as exc:
+                    print(f"feed: thumb {video_id} failed: {exc!r}")
+                    continue
+                self._set_thumb(video_id,
+                                self._cache.put(video_id, resp.content))
+                return
         finally:
             self._pending.discard(video_id)
 
